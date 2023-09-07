@@ -6,10 +6,16 @@ function(add_app_exec EXEC_NAME)
     #target_link_libraries(${EXEC_NAME} PUBLIC ${MPI_LIBRARIES} -mkl=sequential)
 endfunction(add_app_exec)
 
-# function(add_test_exec EXEC_NAME)
-#     add_executable(${EXEC_NAME} ${EXEC_NAME}.cpp)
-#     target_link_libraries(${EXEC_NAME} PUBLIC ${GTEST_LIBRARIES} ${MPI_LIBRARIES})
-# endfunction(add_test_exec)
+
+function(add_cuda_exec EXEC_NAME)
+    include_directories(/opt/intel/oneapi/mkl/2022.0.2/include/)
+    link_directories(/opt/intel/oneapi/mkl/2022.0.2/lib/intel64 )
+    include_directories(/usr/local/cuda-11.6/targets/x86_64-linux/include/)
+    link_directories(/usr/local/cuda-11.6/targets/x86_64-linux/lib/)
+    cuda_add_executable(${EXEC_NAME} ${EXEC_NAME}.cpp ${CMAKE_SOURCE_DIR}/src/word2vec.cu )
+    target_link_libraries(${EXEC_NAME} ${MPI_LIBRARIES} )
+endfunction(add_cuda_exec EXEC_NAME)
+
 
 function(add_tool_exec EXEC_NAME)
     add_executable(${EXEC_NAME} ${EXEC_NAME}.cpp)

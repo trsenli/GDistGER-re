@@ -67,7 +67,7 @@ struct PathSet
     void dump(const char* output_path, const char* fopen_mode, bool with_head_info ,std::vector<vertex_id_t> &vec,std::vector<int>&local_corpus,std::vector<int>&vertex_cn,CoOccorCsr* cocsr)
     {
         Timer timer;
-        // FILE* f = fopen(output_path, fopen_mode);
+        FILE* f = fopen(output_path, fopen_mode);
         assert(f != NULL);
         
         size_t null_sen = 0;
@@ -89,7 +89,7 @@ struct PathSet
                 {
 
                     vec[*(path_begin[worker_idx][walker_idx] + p_i)]++;
-                    // fprintf(f, " %u", *(path_begin[worker_idx][walker_idx] + p_i));
+                    fprintf(f, " %u", *(path_begin[worker_idx][walker_idx] + p_i));
                     // tmp_path.push_back(*(path_begin[worker_idx][walker_idx] + p_i));
 
                     vertex_cn[*(path_begin[worker_idx][walker_idx] + p_i)]++;
@@ -105,12 +105,12 @@ struct PathSet
                     //      cocsr->add_co_occor(cur,cur);
                     // }
                 }
-                // fprintf(f, "\n");
+                fprintf(f, "\n");
                 // local_walk_res.push_back(tmp_path);
                 local_corpus.push_back(-1);
             }
         }
-        // fclose(f);
+        fclose(f);
         printf("p%d null sen: %zu\n",get_mpi_rank(),null_sen);
 #ifndef UNIT_TEST
         printf("[p%d] finish write path data in %lf seconds \n",get_mpi_rank(), timer.duration());

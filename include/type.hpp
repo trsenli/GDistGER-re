@@ -3,6 +3,14 @@
 
 #include <stdint.h>
 #include <iostream>
+#include <queue>
+#include <mutex>
+#include <string>
+
+using std::queue;
+using std::mutex;
+using std::lock_guard;
+using std::string;
 
 typedef uint32_t vertex_id_t;
 typedef uint64_t com_neighbour_t;
@@ -16,6 +24,40 @@ typedef uint32_t dist_counter_t;
 
 struct EmptyData
 {
+};
+
+class SyncQueue
+{
+private:
+   queue<string> base_queue;
+   mutex mutx; 
+   bool isClose ;
+public:
+    SyncQueue(){
+        this->isClose = false;
+    }
+    void push(string iterm){
+        mutx.lock();
+        base_queue.push(iterm);
+        mutx.unlock();
+    }
+    string pop() {
+        mutx.lock();
+        string top = base_queue.front();
+        base_queue.pop();
+        mutx.unlock();
+        return top;
+    }
+    void closeQueue(){
+        lock_guard<std::mutex>(this->mutx);
+        this->isClose = true;
+    }
+    bool isClosed() {
+        return this->isClose;
+    }
+    bool isEmpty() {
+        return this->base_queue.empty();
+    }
 };
 
 template <typename edge_data_t>

@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <queue>
+#include <mutex>
 
 using namespace std; 
 
@@ -399,6 +400,7 @@ public:
     vector<vertex_id_t> new_sort; 
     vertex_id_t minLength = 20;
     vertex_id_t init_round = 5;
+    SyncQueue out_queue;
     
     void get_new_sort()
     {
@@ -636,7 +638,7 @@ public:
         }
         this->set_msg_buffer(walker_array_size, max_msg_size);
 
-        int iter = 0;
+        int iter = 1;
         std::vector<vertex_id_t> context_map_freq(this->v_num, 0);
         std::vector<double> H;
         bool terminal_flag = false;
@@ -673,10 +675,17 @@ public:
                 if (walk_config->output_file_flag)
                 {
                     // std::string local_output_path = walk_config->output_path_prefix + "." + std::to_string(this->local_partition_id);
-                    std::string local_output_path = walk_config->output_path_prefix;
+                    // std::string local_output_path = walk_config->output_path_prefix;
+                    string s_iter = std::to_string(iter);
+                    string s_rank = std::to_string(get_mpi_rank());
+                    cout << "int iter: "<< iter << " string iter: " << s_iter <<endl;
+                    string local_output_path = "tmp-" + s_rank+"-"+s_iter+".txt";
+                    cout<< "local_output_path : " << local_output_path <<endl;
                     Timer timer_dump;
-                    paths->dump(local_output_path.c_str(), iter == 0 ? "w": "a", walk_config->print_with_head_info, context_map_freq,this->local_corpus,this->vertex_cn,this->co_occor);
+                    paths->dump(local_output_path.c_str(), "w", walk_config->print_with_head_info, context_map_freq,this->local_corpus,this->vertex_cn,this->co_occor);
                     this->other_time += timer_dump.duration();
+                    this->out_queue.push(local_output_path);
+                    cout<< "=========== PUSH " << local_output_path <<"======" <<endl;
                     
                     MPI_Allreduce(context_map_freq.data(),  this->vertex_freq, this->v_num, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_COMM_WORLD);
                     uint64_t words_sum = 0;

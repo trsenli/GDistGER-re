@@ -2,8 +2,12 @@
 #include "option_helper.hpp"
 #include <string>
 #include <vector>
-#include "dsgl.hpp"
+#include <thread>
+// #include "dsgl.hpp"
+
 using namespace std;
+
+int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q);
 
 struct Empty
 {
@@ -21,6 +25,7 @@ int main(int argc, char **argv)
     opt.parse(argc, argv);
 
     WalkEngine<real_t, uint32_t> graph;
+
     //=============== annotation line ===================
     graph.set_init_round(opt.init_round);
     printf("opt min length: %d\n",opt.min_length);
@@ -29,6 +34,13 @@ int main(int argc, char **argv)
     graph.load_graph(opt.v_num, opt.graph_path.c_str(), opt.partition_path.c_str(), opt.make_undirected);
     graph.vertex_cn.resize(graph.get_vertex_num());
     // graph.load_commonNeighbors(opt.graph_common_neighbour.c_str());
+    // * 开新线程 跑训练函数
+    vector<vertex_id_t> vertex_degree(graph.v_num,0);
+    for (vertex_id_t v = 0; v < graph.v_num; v++){
+        vertex_degree[v] = graph.vertex_in_degree[v] + graph.vertex_out_degree[v];
+    }
+    thread train_thread(train_corpus_cuda,argc,argv,std::ref(vertex_degree),std::ref(graph.out_queue));
+    // * 
 
     auto extension_comp = [&](Walker<uint32_t> &walker, vertex_id_t current_v)
     {
@@ -64,22 +76,17 @@ int main(int argc, char **argv)
         {
             walk_conf.set_walk_rate(opt.rate);
         }
-        Timer timer;
+        Timer walk_timer;
         printf("================= RANDOM WALK ================\n");
         graph.random_walk(&walker_conf, &tr_conf, &walk_conf);
-        double sum_time = timer.duration();
+        double sum_time = walk_timer.duration();
         double walk_time = sum_time - graph.other_time;
         // printf("[p%u][sum time:]%lf [walk time:]%lf [other time:]%lf\n", graph.get_local_partition_id(), sum_time, walk_time, graph.other_time);
     }
-    // MPI_Barrier(MPI_COMM_WORLD);
     printf("> [p%d RANDOM WALKING TIME:] %lf \n",get_mpi_rank(), timer.duration());
-    // if(get_mpi_rank() == 0){
-    //     FILE* stream_log = fopen("stream.log","a");
-    //     fprintf(stream_log,"%f,",timer.duration());
-    //     fclose(stream_log);
-    // }
-    
 
+    // * 关闭任务队列
+    graph.out_queue.closeQueue();
 
     if(get_mpi_rank()==0){
         cout<<"============partion table=========="<<endl;
@@ -88,31 +95,17 @@ int main(int argc, char **argv)
         }
     }
 
-    // FILE* fcn = fopen((to_string(get_mpi_rank())+string("cn.txt")).c_str(),"w");
-    // fprintf(fcn,"id      \tcn\n");
-    // for(int i=0;i<graph.vertex_cn.size();i++){
-    //     fprintf(fcn,"%-8d\t%-8d\n",i, graph.vertex_cn[i]);
-    // }
-    // fclose(fcn);
 
     MPI_Allreduce(MPI_IN_PLACE,graph.vertex_cn.data(), graph.get_vertex_num(), get_mpi_data_type<int>(), MPI_SUM, MPI_COMM_WORLD);
 
     // ================= annotation line ====================
 
-    graph.new_sort.resize(graph.v_num);
-    for(vertex_id_t v_i=0; v_i < graph.v_num;v_i++){
-        graph.new_sort[v_i] = v_i;
-    }
-
-    // cout<<" new_sort size: "<<graph.new_sort.size()<<endl;
 
 
-   
-    printf("================= EMBEDDING ================\n");
-
-   
-    timer.restart();
-    dsgl(argc, argv,&graph.vertex_cn,&graph.new_sort,&graph);
-    printf("> [%d EMBBEDDING TIME:] %lf \n", get_mpi_rank(),timer.duration());
+    
+    train_thread.join();
+    printf("> [p%d WHOLE TIME:] %lf \n",get_mpi_rank(), timer.duration());
+    // train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue);
+    // dsgl(argc, argv,&graph.vertex_cn,&graph.new_sort,&graph);
     return 0;
 }

@@ -721,7 +721,7 @@ void partition_relabel(const char* graph_path,const char* test_edges_path, verte
     for (edge_id_t e_i = 0; e_i < graph_e_num; e_i++)
     {
         if(e_i%2==0)
-        fprintf(f_graph_path_r,"%u %u %u\n", graph_edges[e_i].src, graph_edges[e_i].dst, graph_edges[e_i].data);
+        fprintf(f_graph_path_r,"%u %u %f\n", graph_edges[e_i].src, graph_edges[e_i].dst, graph_edges[e_i].data);
     }
     fclose(f_graph_path_r);
 
