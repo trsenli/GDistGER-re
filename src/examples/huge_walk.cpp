@@ -31,7 +31,9 @@ int main(int argc, char **argv)
     printf("opt min length: %d\n",opt.min_length);
     graph.set_minLength(opt.min_length);
     printf("init_round = %d, min_length = %d\n", graph.init_round, graph.minLength);
+    printf("graph path: %s\n",opt.graph_path.c_str());
     graph.load_graph(opt.v_num, opt.graph_path.c_str(), opt.partition_path.c_str(), opt.make_undirected);
+    printf("load_graph ok!\n");
     graph.vertex_cn.resize(graph.get_vertex_num());
     // graph.load_commonNeighbors(opt.graph_common_neighbour.c_str());
     // * 开新线程 跑训练函数

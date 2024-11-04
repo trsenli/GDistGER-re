@@ -674,12 +674,12 @@ public:
 
                 if (walk_config->output_file_flag)
                 {
-                    // std::string local_output_path = walk_config->output_path_prefix + "." + std::to_string(this->local_partition_id);
+                     std::string local_output_path = walk_config->output_path_prefix + "." + std::to_string(this->local_partition_id);
                     // std::string local_output_path = walk_config->output_path_prefix;
                     string s_iter = std::to_string(iter);
                     string s_rank = std::to_string(get_mpi_rank());
                     cout << "int iter: "<< iter << " string iter: " << s_iter <<endl;
-                    string local_output_path = "tmp-" + s_rank+"-"+s_iter+".txt";
+                    //string local_output_path = "tmp-" + s_rank+"-"+s_iter+".txt";
                     cout<< "local_output_path : " << local_output_path <<endl;
                     Timer timer_dump;
                     paths->dump(local_output_path.c_str(), "w", walk_config->print_with_head_info, context_map_freq,this->local_corpus,this->vertex_cn,this->co_occor);
