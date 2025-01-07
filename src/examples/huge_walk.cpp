@@ -3,11 +3,14 @@
 #include <string>
 #include <vector>
 #include <thread>
+#include "hnswlib.h"
+#include "edge_container.hpp"
+
 // #include "dsgl.hpp"
 
+// template struct EdgeContainer<real_t>;
 using namespace std;
-
-int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q);
+int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer *csr);
 
 struct Empty
 {
@@ -18,8 +21,8 @@ int main(int argc, char **argv)
 {
     Timer timer;
     MPI_Instance mpi_instance(&argc, &argv);
+    int my_rank = get_mpi_rank();
 
-    vector<string> corpus;
 
     RandomWalkOptionHelper opt;
     opt.parse(argc, argv);
@@ -41,7 +44,29 @@ int main(int argc, char **argv)
     for (vertex_id_t v = 0; v < graph.v_num; v++){
         vertex_degree[v] = graph.vertex_in_degree[v] + graph.vertex_out_degree[v];
     }
-    thread train_thread(train_corpus_cuda,argc,argv,std::ref(vertex_degree),std::ref(graph.out_queue));
+    //myEdgeContainer* myec = reinterpret_cast<myEdgeContainer*>(&graph.g_csr);
+    //cout <<"myec access " << myec-> adj_lists[0].begin->neighbour<<endl; 
+    myEdgeContainer* myec = new myEdgeContainer();
+    myec->adj_lists = new myAdjList[graph.v_num];
+    myec->adj_units = new myAdjUnit[graph.e_num];
+    edge_id_t chunk_edge_idx = 0;
+    cout<<"malloc ok " << endl;
+    for(vertex_id_t v_i = 0; v_i < graph.v_num; v_i++){
+	myec->adj_lists[v_i].begin = myec->adj_units + chunk_edge_idx;
+	chunk_edge_idx += graph.csr->adj_lists[v_i].end -graph.csr->adj_lists[v_i].begin; 
+	myec->adj_lists[v_i].end = myec->adj_units + chunk_edge_idx;
+    }
+    cout << "adj_lists copy" << endl;
+    for(edge_id_t e_i = 0; e_i < graph.e_num; e_i++){
+	    myec->adj_units[e_i].neighbour = graph.csr->adj_units[e_i].neighbour;
+	    myec->adj_units[e_i].data = graph.csr->adj_units[e_i].data;
+    }
+    // TODO: replace csr to g_csr
+    cout <<"myec access " << myec-> adj_lists[110].begin->neighbour<<endl; 
+    cout <<"graph.csr access " << graph.csr-> adj_lists[110].begin->neighbour<<endl; 
+    train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue,my_rank,myec);
+    return 0;
+    // thread train_thread(train_corpus_cuda,argc,argv,std::ref(vertex_degree),std::ref(graph.out_queue), my_rank);
     // * 
 
     auto extension_comp = [&](Walker<uint32_t> &walker, vertex_id_t current_v)
@@ -70,9 +95,8 @@ int main(int argc, char **argv)
         WalkConfig walk_conf;
         if (!opt.output_path.empty())
         {
-            corpus.push_back((opt.output_path + to_string(pid)));
-            walk_conf.set_output_file((opt.output_path + to_string(pid)).c_str());
-            cout << (opt.output_path + to_string(pid)).c_str() << endl;
+            std::cout<< opt.output_path <<std::endl;
+            walk_conf.set_output_file(opt.output_path.c_str());
         }
         if (opt.set_rate)
         {
@@ -102,10 +126,8 @@ int main(int argc, char **argv)
 
     // ================= annotation line ====================
 
-
-
     
-    train_thread.join();
+    // train_thread.join();
     printf("> [p%d WHOLE TIME:] %lf \n",get_mpi_rank(), timer.duration());
     // train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue);
     // dsgl(argc, argv,&graph.vertex_cn,&graph.new_sort,&graph);

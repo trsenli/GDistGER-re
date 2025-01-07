@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.5)
 
 
 project(DistGER)
-
 set(CMAKE_BUILD_TYPE "Debug")
+set(CMAKE_EXPORT_COMPILE_COMMANDS on) # generate compile_commands.json
 
 set(DGER_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 option(WITH_TESTS "Build unit test programs" OFF)
@@ -34,12 +34,11 @@ endif()
 
 find_package(CUDA REQUIRED)
 set(CMAKE_CUDA_COMPILER nvcc)
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${MPI_CXX_COMPILE_FLAGS} -ccbin mpic++")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${MPI_CXX_COMPILE_FLAGS} -ccbin=g++ ")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${MPI_CXX_LINK_FLAGS}")
 
 #use c++11
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -std=c++0x -O3 -D USE_MKL")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -std=c++11 -O3 -D USE_MKL -mavx512f")
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -std=c++0x ")
 message("${CMAKE_CXX_FLAGS}")
 

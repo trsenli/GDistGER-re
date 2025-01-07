@@ -1,21 +1,10 @@
-//  Copyright 2013 Google Inc. All Rights Reserved.
-//
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
-
+#include <cstdio>
+#include <queue>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <cmath>
 #include <cuda_runtime.h>
 #include "type.hpp"
 #include <vector>
@@ -25,10 +14,18 @@
 #include <thread>
 #include <chrono>
 #include <unistd.h>
+#include "shared.h"
+#include "hnswlib.h"
+#include "edge_container.hpp"
+#include "lr_scheduler.hpp"
+#include <algorithm>
 
 using std::vector;
 using std::string;
+using std::cout;
+using std::endl;
 
+#define DELTA_R  100
 #define MAX_STRING 100
 #define EXP_TABLE_SIZE 1000
 #define MAX_EXP 6
@@ -44,6 +41,7 @@ using std::string;
   }\
 }
 
+
 const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
 
 struct vocab_word {
@@ -51,6 +49,9 @@ struct vocab_word {
   int *point;
   char *word, *code, codelen;
 };
+
+int my_rank;
+float *last_emb;
 
 char train_file[MAX_STRING], output_file[MAX_STRING];
 char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];
@@ -75,7 +76,7 @@ float *d_syn0, *d_syn1, *d_expTable;
 
 __device__ float reduceInWarp(float f) {
   for (int i=warpSize/2; i>0; i/=2) {
-    f += __shfl_xor_sync(f, i, 32);
+    f += __shfl_sync(0xFFFFFFFF, f, i, 32);
   }
   return f;
 }
@@ -88,6 +89,144 @@ __device__ void warpReduce(volatile float* sdata, int tid) {
   sdata[tid] += sdata[tid + 2];
   sdata[tid] += sdata[tid + 1];
 }
+
+// calculate cosine similarity of all nodes themselves
+__global__ void cosine_similarity_kernel(float *d_vectors, float *d_result, long long  v, int dim){
+	int i = blockIdx.x * blockDim.x + threadIdx.x;
+	int j = blockIdx.y * blockDim.y + threadIdx.y;
+  // printf("thread [%d,%d]\n",i,j);
+	if( i < v && j < v) {
+		float dot_product = 0.0f;
+		float norm_i = 0.0f;
+		float norm_j = 0.0f;
+
+		// calculate dot_product and L2 norm.
+		for (int k = 0; k < dim; ++k) {
+			float vec_i = d_vectors[i * dim + k];
+      float vec_j = d_vectors[j * dim + k];
+			dot_product += vec_i * vec_j;
+			norm_i += vec_i * vec_i;
+			norm_j += vec_j * vec_j;	
+		}
+		norm_i = sqrt(norm_i);
+		norm_j = sqrt(norm_j);
+		// calculate similarity
+		if(norm_i > 0.0f && norm_j > 0.0f) {
+			d_result[i * v + j] = dot_product / (norm_i * norm_j);
+		}else {
+			d_result[i * v + j] = 0.0f; // prevent division by zero
+		}
+	}
+
+}
+
+__device__ float sigmoid(float x) {
+	return 1.0f / (1.0f + expf(-x));
+}
+
+
+__global__ void compute_kl_divergence_kernel(float *d_A,float *d_B, float *d_result, long long  v){
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	
+	if( idx < v * v) {
+		float p = sigmoid(d_A[idx]);
+		float q = sigmoid(d_B[idx]);
+    // printf("sigmid(%d): %f, %f\n",idx,p,q);
+		// 计算相对熵的部分贡献
+		if(p > 0.0f && q > 0.0f){
+			float contribution = p * logf(p /q );
+      // printf("compute kl idx: %d val: %.2f\n",idx, contribution);
+			atomicAdd(d_result, contribution); //  sum up
+		}
+	}
+}
+
+void  compute_kl_node_and_emb(float *h_node_sim, float *h_emb,float* h_result, long long  v,int dim){
+	float *d_node_sim, *d_emb, *d_cosine, *d_result;
+	cudaMalloc((void**)&d_emb, v * dim * sizeof(float));	
+	cudaMalloc((void**)&d_node_sim, v * v * sizeof(float));	
+	cudaMalloc((void**)&d_cosine, v * v * sizeof(float));	
+	cudaMalloc((void**)&d_result, sizeof(float));
+	
+	cudaMemset(d_result, 0, sizeof(float));
+
+	cudaMemcpy(d_node_sim,h_node_sim, v * v * sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_emb,h_emb, v * dim * sizeof(float), cudaMemcpyHostToDevice);
+
+	dim3 blockSize(256);
+	dim3 gridSize((v*v + blockSize.x - 1) / blockSize.x);
+
+	// d_cosine 
+	cosine_similarity_kernel<<<gridSize, blockSize>>>(d_emb,d_cosine,v,dim);
+
+	// kl_divergence
+	compute_kl_divergence_kernel<<<gridSize,blockSize>>>(d_node_sim,d_cosine,d_result,v);
+
+	// copy result from device to host
+	cudaMemcpy(&h_result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
+
+	cudaFree(d_node_sim);
+	cudaFree(d_emb);
+	cudaFree(d_cosine);
+	cudaFree(d_result);
+}
+void write2file(float* ptr,size_t size,char* filename){
+	FILE* f = fopen(filename,"w");
+	if(f==NULL){
+		printf("Failed to open %s\n",filename);
+		return;
+	}
+	for(size_t i = 0;i<size; i++){
+		fprintf(f,"%.3f ",ptr[i]);
+	}
+	fclose(f);
+}
+
+void  compute_kl_from_emb(float *emb1, float *emb2,float* h_result, long long v,int dim){
+	float *d_emb1, *d_emb2, *d_cosine1, *d_cosine2, *d_result;
+	cudaMalloc((void**)&d_emb1, v * dim * sizeof(float));	
+	cudaMalloc((void**)&d_emb2, v * dim * sizeof(float));	
+	cudaMalloc((void**)&d_cosine1, (size_t)v * v * sizeof(float));	
+	cudaMalloc((void**)&d_cosine2, (size_t)v * v * sizeof(float));	
+	cudaMalloc((void**)&d_result, sizeof(float));
+	
+	cudaMemset(d_result, 0, sizeof(float));
+
+
+	cudaMemcpy(d_emb1,emb1, v * dim * sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_emb2,emb2, v * dim * sizeof(float), cudaMemcpyHostToDevice);
+
+	dim3 blockSize(16,16);
+	dim3 gridSize((v+blockSize.x-1) / blockSize.x,(v+blockSize.y-1)/blockSize.y);
+
+	// d_cosine 
+	cosine_similarity_kernel<<<gridSize, blockSize>>>(d_emb1,d_cosine1,v,dim);
+	cosine_similarity_kernel<<<gridSize, blockSize>>>(d_emb2,d_cosine2,v,dim);
+
+	float *h_cosine = (float*)malloc( (size_t)v * v * sizeof(float));
+	if(h_cosine == NULL)printf("Failed to allocate Mem\n");
+  cudaDeviceSynchronize();
+	cudaMemcpy(h_cosine,d_cosine1, (size_t)v * v * sizeof(float), cudaMemcpyDeviceToHost);
+	write2file(h_cosine,(size_t)v * v,"cosine1.txt");
+	cudaMemcpy(h_cosine,d_cosine2, (size_t)v * v  * sizeof(float), cudaMemcpyDeviceToHost);
+	write2file(h_cosine,(size_t)v* v,"cosine2.txt");
+
+	int kl_blockSize = 256;
+  int kl_gridSize = (v * v + kl_blockSize - 1) / kl_blockSize;
+	// kl_divergence
+	compute_kl_divergence_kernel<<<kl_gridSize,kl_blockSize>>>(d_cosine1,d_cosine2,d_result,v);
+  cudaDeviceSynchronize();
+
+	// copy result from device to host
+	cudaMemcpy(h_result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
+
+	cudaFree(d_emb1);
+	cudaFree(d_emb2);
+	cudaFree(d_cosine1);
+	cudaFree(d_cosine2);
+	cudaFree(d_result);
+}
+
 
 template<unsigned int VSIZE>
 __global__ void __sgNegReuse(const int window, const int layer1_size, const int negative, const int vocab_size, float alpha,
@@ -494,7 +633,7 @@ void SortVocab() {
   int a, size;
   unsigned int hash;
   // Sort the vocabulary and keep </s> at the first position
-  qsort(&vocab[1], vocab_size - 1, sizeof(struct vocab_word), VocabCompare);
+  qsort(&vocab[0], vocab_size, sizeof(struct vocab_word), VocabCompare);
   for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
   size = vocab_size;
   train_words = 0;
@@ -637,7 +776,7 @@ void LearnVocabFromTrainFile() {
   SortVocab();
   if (debug_mode > 0) {
     printf("Vocab size: %lld\n", vocab_size);
-    printf("Words in train file: %lld\n", train_words);
+    printf("Words in train file: %lld\n", train_words); 
   }
   file_size = ftell(fin);
   fclose(fin);
@@ -657,10 +796,11 @@ void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
   vocab_size = 0;
   for (vertex_id_t v = 0; v < v_num; v++)
   {
-    std::sprintf(word,"%u",v);
+    std::sprintf(word,"%u",v);  // node ID 以字符串的形式存在 vocab 里面。
     a = AddWordToVocab(word);
     vocab[a].cn = degrees[v];
   }
+  // 现在vocab 里面存了所有 {nodeId,degree} 的形式。
   SortVocab();
   if (debug_mode > 0) {
     printf("Vocab size: %lld\n", vocab_size);
@@ -704,6 +844,11 @@ void ReadVocab() {
 void InitNet() {
   long long a, b;
   unsigned long long next_random = 1;
+  a = posix_memalign((void **)&last_emb, 128, (long long)vocab_size * layer1_size * sizeof(float));
+  memset(last_emb,0,(long long)vocab_size * layer1_size * sizeof(float));
+
+  if (last_emb == NULL) {printf("Memory allocation failed\n"); exit(1);}
+  
   a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * layer1_size * sizeof(float));
   if (syn0 == NULL) {printf("Memory allocation failed\n"); exit(1);}
   if (hs) {
@@ -803,10 +948,10 @@ void sgKernel(int *d_sen, int *d_sent_len, int *d_negSample, float alpha, int cn
   }
 }
 
+LR *lr_scheduler;
 void TrainModelThread(string data_path)
 {
-  
-  printf("=====================Train fila %s============\n",data_path.c_str());
+  printf("[ p%d ]=====================Train file %s============\n",my_rank,data_path.c_str());
   long long word, word_count = 0, last_word_count = 0;
   long long local_iter = iter;
 
@@ -829,8 +974,9 @@ void TrainModelThread(string data_path)
 
   clock_t now;
   strcpy(train_file,data_path.c_str());
-  FILE *fi = fopen(train_file, "rb");
+  FILE *fi = fopen(train_file, "r");
   if(fi == nullptr) {
+    printf("open [%s] fail\n",data_path.c_str());
     throw std::runtime_error("Data file open fail");
   }
   fseek(fi, 0, SEEK_SET);
@@ -846,8 +992,8 @@ void TrainModelThread(string data_path)
             word_count_actual / ((float)(now - start + 1) / (float)CLOCKS_PER_SEC * 1000));
         fflush(stdout);
       }
-      alpha = starting_alpha * (1 - word_count_actual / (float)(iter * train_words + 1));
-      if (alpha < starting_alpha * 0.0001) alpha = starting_alpha * 0.0001;
+      // alpha = starting_alpha * (1 - word_count / (float)(iter * train_words + 1));
+      // if (alpha < starting_alpha * 0.0001) alpha = starting_alpha * 0.0001;
     }
     total_sent_len = 0;
     sentence_length[0] = 0;
@@ -944,18 +1090,182 @@ void TrainModelThread(string data_path)
 }
 vector<vertex_id_t> g_v_degree;
 
-void TrainModel(SyncQueue& taskq) {
+void myIntersectition(const vector<vertex_id_t>& v1,const vector<vertex_id_t>& v2,vector<vertex_id_t>& v_intersection)
+{
+    int p1=0;
+    int p2=0;
+    int v1_sz = v1.size();
+    int v2_sz = v2.size();
+    const vector<vertex_id_t>*long_v;
+    const vector<vertex_id_t>*short_v;
+    if(v1_sz>v2_sz){
+        long_v=&v1;
+        short_v=&v2;
+    }else{
+        long_v=&v2;
+        short_v=&v1;
+    }
+    int max_sz = max(v1_sz,v2_sz);
+    int min_sz = min(v1_sz,v2_sz);
+    
+    int begin = 0;
+    if(v1.empty()||v2.empty())return;
+    if((*long_v)[max_sz-1]<(*short_v)[0]||((*long_v)[0]>(*short_v)[min_sz-1]))return;
+    while(p1<max_sz&&p2<min_sz){
+        int offset = 1;
+        int last_p = offset;
+        if((*short_v)[p2]<((*long_v)[p1])){
+            p2++;
+            continue;
+        }
+        while((*long_v)[p1+offset-1]<(*short_v)[p2]){
+            offset=offset*2;
+            last_p = p1+offset<max_sz?offset:max_sz-p1;
+            if(p1+offset>=max_sz)break;
+        }
+        if((*long_v)[max_sz-1]<(*short_v)[p2]){
+            p2++;
+            break;
+        }
+        auto iter = lower_bound(long_v->begin()+(p1+offset/2),long_v->begin()+p1+last_p,(*short_v)[p2]); // 如果在 区间找到了
+        int t = iter - long_v->begin();
+        if(*iter==(*short_v)[p2]){
+            v_intersection.push_back((*short_v)[p2]);
+            p2++;
+            p1=t++;
+        }else{
+            p2++;
+            p1=(p1+offset/2);
+        }
+    };   
+   
+}
+
+float count_ann_intersection(float percent,myEdgeContainer* csr){
+  float count = 0;
+  float search_sum = 0;
+  // build hnswlib index
+  int dim = layer1_size; 
+  int max_elements = vocab_size;
+  int M = 12;// 控制构建图中每个节点的最大邻居数，M 大图更稠密，搜索进度高，但是内存大，构图时间长。通常 12～48
+  int ef_construction = 50; // 控制构图质量，越高，图质量高，搜索精度高，但是构图时间长。
+  
+  hnswlib::L2Space space(dim);
+  hnswlib::HierarchicalNSW<float>* alg_hnsw = new hnswlib::HierarchicalNSW<float>(&space,max_elements, M,ef_construction);
+
+  // 添加向量索引
+  for(int i =0; i < max_elements;i++){
+      alg_hnsw->addPoint(syn0+ i * dim,i);
+  } 
+
+  // count ann intersection of top 10% node
+  for(size_t i = 0; i < vocab_size * percent; i++){
+    char* endptr;
+    // TODO: 设置一个上线，而不是真实的邻居数。设置大概 20，30
+    vertex_id_t search_num = vocab[i].cn > 20 ? 20 : vocab[i].cn;
+    search_sum += search_num;
+    // 索引 i 的真实 node id
+    vertex_id_t nid = (vertex_id_t)strtoul(vocab[i].word,&endptr,10);
+    if(*endptr != '\0'){
+      printf("Conversion failed. Invalid character: %c\n",*endptr);
+    }
+    auto result = alg_hnsw->searchKnn(syn0+i*dim,search_num);
+    vector<vertex_id_t> ann_neighbor;
+    while(!result.empty()){
+      // result.top().second 是 ann 中的索引，还要转换成 node id。
+      vertex_id_t ann_nei_id = (vertex_id_t)strtoul(vocab[result.top().second].word,&endptr,10);
+      ann_neighbor.push_back(ann_nei_id);
+      result.pop();
+    }
+    vector<vertex_id_t> real_neighbor;
+    for(auto it = csr->adj_lists[nid].begin; it < csr->adj_lists[nid].end; it++){
+      real_neighbor.push_back(it->neighbour);
+    }
+    sort(ann_neighbor.begin(),ann_neighbor.end());
+    sort(real_neighbor.begin(),real_neighbor.end());
+    // cout <<endl<< "ann: ";
+    // for(auto it:ann_neighbor){
+    //   cout << it <<" ";
+    // }  
+    // cout << endl;
+    // cout << " real: ";
+    // for(auto it: real_neighbor){
+    //   cout << it <<" ";
+    // }
+    // cout << endl;
+    vector<vertex_id_t> result_neighbor;
+    myIntersectition(ann_neighbor,real_neighbor,result_neighbor);
+    // count += result_neighbor.size();
+    // cout << result_neighbor.size()<<"/"<<search_num<<" ";
+    // break;
+  }
+  // cout<< "count: " << count <<" sum: " <<search_sum << " acc: "<< count/search_sum <<endl;
+  return count/search_sum;
+}
+float cos_sim(float* v1,float* v2, int dim){
+  float dot_product = 0.0;
+  float v1_l2 = 0.0, v2_l2 = 0.0;
+  for(int d = 0; d < dim; d++){
+    dot_product += v1[d] * v2[d];
+    v1_l2 += v1[d] * v1[d];
+    v2_l2 += v2[d] * v2[d];
+  }
+  v1_l2 = sqrt(v1_l2);
+  v2_l2 = sqrt(v2_l2);
+  return dot_product/(v1_l2 * v2_l2);
+}
+
+float find_supernode_topK_accurancy(float p,int k,myEdgeContainer*csr){
+  float top_sum = 0;
+  for(vertex_id_t v_i = 0; v_i < vocab_size*0.03; v_i ++){
+    vector<std::pair<float,vertex_id_t>> supernode_sim;
+    for(vertex_id_t v_j = 0; v_j < vocab_size * p; v_j ++){
+      float sim = cos_sim(syn0+v_i * layer1_size, syn0+v_j*layer1_size,layer1_size);
+      supernode_sim.push_back({sim,v_j});
+    }
+    sort(supernode_sim.begin(),supernode_sim.end(),[](std::pair<float,vertex_id_t>&p1,std::pair<float,vertex_id_t>&p2){
+        return p1.first > p2.first;
+        });
+    vector<vertex_id_t> selected_topK(k);
+    for(int i = 0 ;i< k; i++){
+      // selected_topK[i] = supernode_sim[i].second;
+      selected_topK[i] = supernode_sim[i].second ; 
+    }
+    vector<vertex_id_t> real_neighbor;
+    for(auto it = csr->adj_lists[v_i].begin; it < csr->adj_lists[v_i].end; it++){
+      real_neighbor.push_back(it->neighbour);
+    }
+    sort(real_neighbor.begin(),real_neighbor.end());
+    sort(selected_topK.begin(),selected_topK.end());
+    vector<vertex_id_t>result_set;
+    myIntersectition(selected_topK, real_neighbor, result_set);
+    top_sum += result_set.size();
+  }
+  return top_sum/ (float)(k * vocab_size *p);
+}
+void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   printf("==========================Train Model In=====================\n");
   long a, b, c, d;
   FILE *fo;
   starting_alpha = alpha;
   ReadVocabFromDegree(g_v_degree);
   printf("========================Read Vocab ok=======================\n");
+  printf("vocab_size: %lu\n",vocab_size);
+
+  // for(size_t i = 0; i < vocab_size * 0.10;i++){
+  //   printf("id: %s, degree: %ld\n",vocab[i].word,vocab[i].cn);
+  // }
+
+  vector<float> H;
+  float delta_H;
+  
 
   // if (read_vocab_file[0] != 0) ReadVocab(); else LearnVocabFromTrainFile();
   // if (save_vocab_file[0] != 0) SaveVocab();
+  if (output_file[0] == 0) printf("[ Warning ] output file missing\n");
   if (output_file[0] == 0) return;
   InitNet();
+  printf("[ %d ] InitNet Success\n",my_rank);
   if (hs > 0) InitVocabStructCUDA();
   if (negative > 0) InitUnigramTable();
 
@@ -963,22 +1273,72 @@ void TrainModel(SyncQueue& taskq) {
   srand(time(NULL));
 
   printf("==========init success================\n");
-  std::chrono::milliseconds sleepDuration(5000);
-  while(1){
-    if(taskq.isClosed() && taskq.isEmpty())
-      break;
-    if(!taskq.isEmpty()){
-      std::string filename = taskq.pop();
-      printf("============POP FILE %s queue state %d =============\n", filename.c_str(), taskq.isClosed());
-      TrainModelThread(filename);
-    }
-    usleep(1);
+  float* kl = new float;
+  // lr_scheduler = new  FixedLR(0.025);
+  // lr_scheduler = new  StepDecayLR(0.025,0.5,3);
+  lr_scheduler = new ExponentialDecayLR(0.025,0.1);
+
+  // TrainModelThread("./out/tmp-0-1.txt");
+  // float acc = find_supernode_topK_accurancy(0.01,10,csr);
+  //
+  // cout << "find super node topK acc: " << acc << endl;
+  FILE* f_topk = fopen("super_topK.txt","w");
+  int n1 = 2;
+  while(n1++<30){
+    char fc[100];
+    sprintf(fc,"./out/tmp-0-%d.txt",n1);
+    alpha = lr_scheduler->get_lr();
+    TrainModelThread(fc);
+    std::cout << std::endl;
+    float acc = find_supernode_topK_accurancy(0.01,10,csr);
+    cout << "find super node topK acc: " << acc << endl;
+    fprintf(f_topk,"%f\n",acc);
   }
-  printf("=============Task over===========\n");
+  fclose(f_topk);
+  return;
 
-  // TODO: 把这个做成最小的事务，然后在每个阶段调用这个函数就行了。
-  // TrainModelThread(filepath);
+  // [Test]
+  FILE* f_ann = fopen("ann_accuracy.txt","w");
+  int n = 2;
+  while(n++<30){
+    char fc[100];
+    sprintf(fc,"./out/ytb-0-%d.txt",n);
+    alpha = lr_scheduler->get_lr();
+    TrainModelThread(fc);
+    std::cout << std::endl;
+    float acc = count_ann_intersection(0.01,csr);
+    fprintf(f_ann,"%f\n",acc);
+  }
+  fclose(f_ann);
+  return;
+  
+  //compute_kl_from_emb(last_emb,syn0, kl,tmpN,layer1_size);
+  //std::cout << std::endl;
+  //checkCUDAerr(cudaDeviceSynchronize()); 
+  //printf("[ %d ] COMPUTE KL From Emb : %.f\n",my_rank,*kl);
 
+  // [End Test]
+
+ //  FILE* f_rel_ent = fopen("rel_ent.txt","w");
+ //  FILE* f_delta_ent = fopen("delta_ent.txt","w");
+ // int n = 2;
+ //  while(n++<30){
+ //    char fc[100];
+ //    sprintf(fc,"./out/tmp-0-%d.txt",n);
+ //    TrainModelThread(fc);
+ //    cout << endl;
+ //    // termination judgment
+ //    compute_kl_from_emb(last_emb,syn0, kl,vocab_size * 0.1,layer1_size);
+ //    checkCUDAerr(cudaDeviceSynchronize()); 
+ //    printf("[ %d ] COMPUTE KL from emb : %.f\n",my_rank,*kl);
+ //    fprintf(f_rel_ent,"%s: %f\n",fc,*kl);
+ //    memcpy(last_emb,syn0,(long long)vocab_size * layer1_size * sizeof(float));
+ //  }
+ //  fclose(f_delta_ent);
+ //  fclose(f_rel_ent);
+ //  printf("=============Task over | Calculate delta H ===========\n");
+  
+  
   cudaFree(d_table);
   cudaFree(d_syn1);
   cudaFree(d_syn0);
@@ -986,9 +1346,12 @@ void TrainModel(SyncQueue& taskq) {
   cudaFree(d_vocab_point);
   cudaFree(d_vocab_code);
 
+  if(my_rank != 0) return;
+
   std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
 
   fo = fopen(output_file, "wb");
+  if(fo == NULL) printf("[ %d ] [%s] open fail\n",output_file);
   if (classes == 0) {	
     // Save the word vectors
     fprintf(fo, "%lld %lld\n", vocab_size, layer1_size);
@@ -1048,7 +1411,7 @@ void TrainModel(SyncQueue& taskq) {
   }
   std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
   std::chrono::duration<double> time_span = std::chrono::duration_cast<std::chrono::duration<double>>(t2-t1);
-  std::cout<<"====Save Embedding: " <<time_span.count() << " s" <<std::endl;
+  std::cout<<"[ "<<my_rank<<" ] Save Embedding: " <<time_span.count() << " s" <<std::endl;
   fclose(fo);
 }
 
@@ -1063,15 +1426,75 @@ int ArgPos(char *str, int argc, char **argv) {
   }
   return -1;
 }
+int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer* csr) {
 
-int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q) {
+  printf("No.10%: %llu\n",degrees[degrees.size() * 0.03]);
+  // test area 
+
+  // test __global__ void cosine_similarity_kernel(float *d_vectors, float *d_result, int v, int dim){
+  float h_vec[] = {1,2,3,1,4,1};
+  float h_vec2[] = {1,1,1,1,2,1};
+  float *d_vec;
+  float *d_result;
+  int v = 2;
+  int dim = 3;
+  float* h_result = new float[v * dim];
+
+  checkCUDAerr(cudaMalloc((void **)&d_result, (long long)v * dim * sizeof(float)));
+  checkCUDAerr(cudaMalloc((void **)&d_vec, (long long)v * dim * sizeof(float)));
+  checkCUDAerr(cudaMemcpy(d_vec, h_vec, (long long)v * dim * sizeof(float), cudaMemcpyHostToDevice));
+
+	dim3 blockSize(16,16);
+	dim3 gridSize((v+blockSize.x-1) / blockSize.x,(v+blockSize.y-1)/blockSize.y);
+  cosine_similarity_kernel<<<gridSize,blockSize>>>(d_vec,d_result,v,dim);
+
+  checkCUDAerr(cudaMemcpy(h_result, d_result, (long long)v * dim * sizeof(float), cudaMemcpyDeviceToHost));
+
+  for(int i = 0; i < v * v; i++){
+    std::cout << h_result[i] << " ";
+  }
+  std::cout << std::endl;
+
+  checkCUDAerr(cudaMemcpy(d_vec, h_vec2, (long long)v * dim * sizeof(float), cudaMemcpyHostToDevice));
+  cosine_similarity_kernel<<<gridSize,blockSize>>>(d_vec,d_result,v,dim);
+  checkCUDAerr(cudaMemcpy(h_result, d_result, (long long)v * dim * sizeof(float), cudaMemcpyDeviceToHost));
+  // TEST __global__ void compute_kl_divergence_kernel(float *d_A,float *d_B, float *d_result, int v){
+  for(int i = 0; i < v * v; i++){
+    std::cout << h_result[i] << " ";
+  }
+  std::cout << std::endl;
+  
+  float h_A[] = {1,0.942809,0.942809,1 };
+  float h_B[] = {1,0.755929,0.755929,1 };
+  float *d_A,*d_B,*d_res;
+  float *h_res = new float;
+  
+  checkCUDAerr(cudaMalloc((void **)&d_A, (long long)v * v * sizeof(float)));
+  checkCUDAerr(cudaMalloc((void **)&d_B, (long long)v * v * sizeof(float)));
+  checkCUDAerr(cudaMemcpy(d_A, h_A, (long long)v * v * sizeof(float), cudaMemcpyHostToDevice));
+  checkCUDAerr(cudaMemcpy(d_B, h_B, (long long)v * v * sizeof(float), cudaMemcpyHostToDevice));
+  checkCUDAerr(cudaMalloc((void **)&d_res,sizeof(float)));
+
+  int blockSize2 = 256;
+  int gridSize2 = (v * v + blockSize2 - 1) / blockSize2;
+  compute_kl_divergence_kernel<<<gridSize2,blockSize2>>>(d_A,d_B,d_res,v);
+  checkCUDAerr(cudaMemcpy(h_res,d_res,sizeof(float),cudaMemcpyDeviceToHost));
+
+  std::cout<< "KL: " << *h_res<< std::endl;
+  
+
+  // TEST void  compute_kl_from_emb(float *emb1, float *emb2,float* h_result, int v,int dim){
+  float h_test1[] = {1,1,1,1,2,1};
+  float h_test2[] = {1,2,3,1,4,1};
+
+  float* h_kl = new float;
+  compute_kl_from_emb(h_test1,h_test2,h_kl,2,3);
+  printf("[TEST] GET Kl From Emb: %f\n",*h_kl);
+
+  // end test area
+
+  my_rank = _my_rank;
   g_v_degree.assign(degrees.begin(), degrees.end());
-  // while(1){
-  //   if(corpus_q.isClosed() && corpus_q.isEmpty())
-  //     break;
-  //   if(!corpus_q.isEmpty())
-  //     printf("============POP FILE %s queue state %d =============\n", corpus_q.pop().c_str(),corpus_q.isClosed());
-  // }
   printf("train_corpus_Cuda calling!!!!\n");
   int i;
   if (argc == 1) {
@@ -1131,7 +1554,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   if ((i = ArgPos((char *)"-cbow", argc, argv)) > 0) cbow = atoi(argv[i + 1]);
   if (cbow) alpha = 0.05;
   if ((i = ArgPos((char *)"-alpha", argc, argv)) > 0) alpha = atof(argv[i + 1]);
-  if ((i = ArgPos((char *)"-output", argc, argv)) > 0) strcpy(output_file, argv[i + 1]);
+  if ((i = ArgPos((char *)"-emb_output", argc, argv)) > 0) strcpy(output_file, argv[i + 1]);
   if ((i = ArgPos((char *)"-window", argc, argv)) > 0) window = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-sample", argc, argv)) > 0) sample = atof(argv[i + 1]);
   if ((i = ArgPos((char *)"-hs", argc, argv)) > 0) hs = atoi(argv[i + 1]);
@@ -1152,7 +1575,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   checkCUDAerr(cudaMalloc((void **)&d_expTable, (EXP_TABLE_SIZE + 1) * sizeof(float)));
   checkCUDAerr(cudaMemcpy(d_expTable, expTable, (EXP_TABLE_SIZE + 1) * sizeof(float), cudaMemcpyHostToDevice));
 
-  TrainModel(corpus_q);
+  TrainModel(corpus_q,csr);
 
   // memory free
   free(vocab_codelen);
@@ -1166,6 +1589,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   free(vocab_hash);
   free(expTable);
   cudaFree(d_expTable);
+  free(last_emb);
 
   return 0;
 }

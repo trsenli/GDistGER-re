@@ -7,6 +7,7 @@ endfunction(add_app_exec)
 
 
 function(add_cuda_exec EXEC_NAME)
+    include_directories(${PROJECT_SOURCE_DIR}/ext/hnswlib/hnswlib)
     include_directories(/opt/intel/oneapi/mkl/2022.0.2/include/)
     link_directories(/opt/intel/oneapi/mkl/2022.0.2/lib/intel64 )
     include_directories(/usr/local/cuda-11.6/targets/x86_64-linux/include/)

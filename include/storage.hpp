@@ -23,7 +23,8 @@ void read_graph(const char* fname, int partition_id, int partition_num, T* &edge
     // std::cout << "size of T = " << sizeof(T);
     e_num = total_e_num / partition_num;
 
-    if (partition_id == partition_num -1)
+
+    if (partition_id == partition_num - 1)
     {
         e_num += total_e_num % partition_num;
     }

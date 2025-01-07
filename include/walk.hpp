@@ -11,11 +11,14 @@
 #include <algorithm>
 #include <queue>
 #include <mutex>
+#include "shared.h"
 
 using namespace std; 
 
 using precision_t = double;
 using frequency_t = int;
+
+ volatile bool stop_sampling_flag = false;
 
 // #define minLength 20
 const double R = 0.999;
@@ -674,18 +677,18 @@ public:
 
                 if (walk_config->output_file_flag)
                 {
-                     std::string local_output_path = walk_config->output_path_prefix + "." + std::to_string(this->local_partition_id);
+                    //  std::string local_output_path = walk_config->output_path_prefix + "." + std::to_string(this->local_partition_id);
                     // std::string local_output_path = walk_config->output_path_prefix;
                     string s_iter = std::to_string(iter);
                     string s_rank = std::to_string(get_mpi_rank());
                     cout << "int iter: "<< iter << " string iter: " << s_iter <<endl;
-                    //string local_output_path = "tmp-" + s_rank+"-"+s_iter+".txt";
-                    cout<< "local_output_path : " << local_output_path <<endl;
+                    cout<< "output_path_prefix : " << walk_config->output_path_prefix <<endl;
+                    string local_output_path = walk_config->output_path_prefix +"-" + s_rank+"-"+s_iter+".txt";
                     Timer timer_dump;
                     paths->dump(local_output_path.c_str(), "w", walk_config->print_with_head_info, context_map_freq,this->local_corpus,this->vertex_cn,this->co_occor);
                     this->other_time += timer_dump.duration();
                     this->out_queue.push(local_output_path);
-                    cout<< "=========== PUSH " << local_output_path <<"======" <<endl;
+                    cout<< "=========== [ PUSH " << local_output_path <<"]======" <<endl;
                     
                     MPI_Allreduce(context_map_freq.data(),  this->vertex_freq, this->v_num, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_COMM_WORLD);
                     uint64_t words_sum = 0;
@@ -730,9 +733,18 @@ public:
                         std::cout << "Delat RE：" << abs(delta_H) << std::endl;
                     }
                     iter = iter == 0 ? init_round + 1 : iter + 1;
+                    // if(stop_sampling_flag == true){
+                    //     printf("[ %d ] STOP_SAMPLING_FLAG SET \n",get_mpi_rank());
+                    //     terminal_flag = true;
+                    // }
+                    if(iter > 30){ // TEST 看看 30 轮的相对熵怎么变化的。
+                        stop_sampling_flag = true;
+                        terminal_flag = true;
+                        remained_walker = 0;
+                    }
                     if(abs(delta_H) <= delta_R)
                     {
-                        terminal_flag = true;
+                        // terminal_flag = true;
                         // remained_walker = 0;
                     }else
                     {

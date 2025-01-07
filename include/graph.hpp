@@ -470,41 +470,41 @@ public:
         MPI_Allreduce(MPI_IN_PLACE,this->co_occor->adjUnit.data()+round*round_size,round_mod,get_mpi_data_type<vertex_id_t>(),MPI_MAX,MPI_COMM_WORLD);
 
     }
-    // void g_build_edge_container(Edge<edge_data_t>* edges, edge_id_t e_num, vertex_id_t v_num, EdgeContainer<edge_data_t>* ec, vertex_id_t* vertex_out_degree)
-    // {
-    //     this->co_occor->adjList.resize(v_num);
-    //     this->co_occor->adjUnit.resize(e_num);
-    //     this->co_occor->co_occor.resize(e_num);
+     void g_build_edge_container(Edge<edge_data_t>* edges, edge_id_t e_num, vertex_id_t v_num, EdgeContainer<edge_data_t>* ec, vertex_id_t* vertex_out_degree)
+     {
+         this->co_occor->adjList.resize(v_num);
+         this->co_occor->adjUnit.resize(e_num);
+         this->co_occor->co_occor.resize(e_num);
 
-    //     ec->adj_lists = new AdjList<edge_data_t>[v_num];
-    //     ec->adj_units = new AdjUnit<edge_data_t>[e_num];
+         ec->adj_lists = new AdjList<edge_data_t>[v_num];
+         ec->adj_units = new AdjUnit<edge_data_t>[e_num];
 
-    //     edge_id_t chunk_edge_idx = 0;
-    //     for (vertex_id_t v_i = 0; v_i < v_num; v_i++)
-    //     {
-    //         ec->adj_lists[v_i].begin = ec->adj_units + chunk_edge_idx;
-    //         ec->adj_lists[v_i].end = ec->adj_lists[v_i].begin; 
+         edge_id_t chunk_edge_idx = 0;
+         for (vertex_id_t v_i = 0; v_i < v_num; v_i++)
+         {
+             ec->adj_lists[v_i].begin = ec->adj_units + chunk_edge_idx;
+             ec->adj_lists[v_i].end = ec->adj_lists[v_i].begin; 
 
-    //         this->co_occor->adjList[v_i].begin = chunk_edge_idx;
-    //         this->co_occor->adjList[v_i].end = this->co_occor->adjList[v_i].begin;
+             this->co_occor->adjList[v_i].begin = chunk_edge_idx;
+             this->co_occor->adjList[v_i].end = this->co_occor->adjList[v_i].begin;
 
-    //         chunk_edge_idx += vertex_out_degree[v_i];
-    //     }
-    //     printf("stage 1\n");
-    //     for (edge_id_t e_i = 0; e_i < e_num; e_i++)
-    //     {
-    //         auto e = edges[e_i];
+             chunk_edge_idx += vertex_out_degree[v_i];
+         }
+         printf("stage 1\n");
+         for (edge_id_t e_i = 0; e_i < e_num; e_i++)
+         {
+             auto e = edges[e_i];
 
-    //         auto ep = ec->adj_lists[e.src].end++; 
-    //         ep->neighbour = e.dst;
-    //         ep->data = e.data;
+             auto ep = ec->adj_lists[e.src].end++; 
+             ep->neighbour = e.dst;
+             ep->data = e.data;
 
-    //         auto t = this->co_occor->adjList[e.src].end++;
-    //         this->co_occor->adjUnit[t] = e.dst;
-    //         this->co_occor->co_occor[t] = 0;
+             auto t = this->co_occor->adjList[e.src].end++;
+             this->co_occor->adjUnit[t] = e.dst;
+             this->co_occor->co_occor[t] = 0;
 
-    //     }
-    // }
+         }
+     }
 
     void build_edge_container(Edge<edge_data_t> *edges, edge_id_t local_edge_num, EdgeContainer<edge_data_t> *ec, vertex_id_t* vertex_out_degree)
     {
@@ -651,13 +651,13 @@ public:
         Edge<edge_data_t> *read_edges;
         edge_id_t read_e_num;
 
-        // Edge<edge_data_t> *g_read_edges;
-        // edge_id_t g_read_e_num;
+        Edge<edge_data_t> *g_read_edges;
+        edge_id_t g_read_e_num;
 
         if (graph_format == GF_Binary)
         {
             read_graph(graph_path, local_partition_id, partition_num, read_edges, read_e_num);
-            // g_read_graph(graph_path,  g_read_edges, g_read_e_num);
+            //g_read_graph(graph_path,  g_read_edges, g_read_e_num);
             printf("read edge=========ok\n");
         } else if (graph_format == GF_Edgelist)
         {
@@ -801,8 +801,8 @@ public:
         this-> co_occor = new CoOccorCsr();
         build_edge_container(local_edges, local_e_num, this->csr, vertex_out_degree);
         // printf("co_coccor build before====ok\n");
-        // g_build_edge_container(g_read_edges,g_read_e_num,v_num,this->g_csr,vertex_out_degree);
-        // g_build_edge_container(local_edges,local_e_num,vertex_out_degree);
+         //g_build_edge_container(g_read_edges,g_read_e_num,v_num,this->g_csr,vertex_out_degree);
+        g_build_edge_container(local_edges,local_e_num,vertex_out_degree);
         // printf("co_coor build====ok\n");
         // printEdgeContainer(this->csr->adj_lists);
 

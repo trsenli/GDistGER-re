@@ -1,60 +1,77 @@
 #
 # Script Name: run.sh
-# Description: The run shell script of DistGER.
+# Description: The run shell script of GDistGER.
 # Author: lzl
-# Date: 2023/03/20
+# Date: 2024/11/19
 #
 # Usage:
 #  ./your_script_name.sh [option1] [option2] ...
+#  ./run.sh <graph> 
 #
 # Options:
-#  -h, --help    Displays this help message
-#  -v, --version Displays version information
+#  graph, the graph dataset.
 #
 # Example Usage:
-#  ./your_script_name.sh -v
-#
-# Dependencies:
-#  List any dependencies your script requires to run
+#  ./run.sh wiki
 #
 # Notes:
-#  Any additional notes or information about your script
+#  Testing for GDistGER, Args includes sampling args, learning args, distribute args and openmpi args.
 #
+
 #sync_size_cal=$(echo "2^$2" | bc)
+
 export OMPI_ALLOW_RUN_AS_ROOT=1 
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 
 sync_size_cal=1024
-bin=./bin/huge_walk
-graph=/home/lzl/nfs.d/dataset/original_bin
-train_graph=../dataset/train_bin/$1_train.data
-node_num=1
-other_option=" -o ./out/walk.txt --make-undirected \
-    -eoutput ./out/$1_emb.txt -size 300 -iter 3 -threads 10 -window 10 -negative 5 -batch-size 21 -min-count 0 -sample 1e-3 -alpha 0.01 -debug 2 -sync-size $sync_size_cal"
 
-# nvprof="nvprof --metrics sm_efficiency,achieved_occupancy --profile-from-start off "
-# nvprof="nvprof "
+BIN=./bin/huge_walk
+GRAPH_PREFIX=/home/lzl/nfs.d/dataset/original_bin
+TRAIN_GRAPH=../dataset/train_bin/$1_train.data
+NODE_NUM=1
 
-#DISTRIBUTE="-hostfile ./hosts "
-OPENMPI_CONFIG=" -mca btl ^openib -mca mtl ^ofi -mca btl_tcp_if_include ens17f0 "
+#DISTRIBUTE_ARGS="-hostfile ./hosts "
+OPENMPI_CONFIG_ARGS=" -mca btl ^openib -mca mtl ^ofi -mca btl_tcp_if_include ens17f0 "
+GRAPH_NAME=$1
+GRAPH=$GRAPH_PREFIX/${GRAPH_NAME}.data
 
-if [ $1 = "wiki" ]; then
-	mpirun $OPENMPI_CONFIG $DISTRIBUTE -npernode $node_num $bin -g $graph/$1.data -v 7115 -w 7115 --min_L 20 --min_R 5 $other_option
-	#mpiexec -np $node_num $bin -g $graph/$1.data -v 7115 -w 7115 --min_L 20 --min_R 5 $other_option
-	#nvprof $bin -g $graph -v 7115 -w 7115 --min_L 20 --min_R 5 $other_option
-elif [ $1 = "ytb" ]; then
-	# mpiexec -n $node_num $bin -g $graph -v 1138499 -w 1138499 --min_L 20 --min_R 10 $other_option
-	$nvprof $bin -g $train_graph -v 1138499 -w 1138499 --min_L 20 --min_R 1 $other_option
-elif [ $1 = "soc" ]; then
-	# mpiexec -n $node_num $bin -g $graph -v 1632803  -w 1632803  --min_L 20 --min_R 5 $other_option
-	$nvprof $bin -g $graph -v 1632803 -w 1632803 --min_L 20 --min_R 1 $other_option
-elif [ $1 = "LJ" ]; then
-	# mpiexec -n $node_num $bin -g $graph -v 2238731 -w 2238731 --min_L 20 --min_R 5 $other_option
-	$nvprof $bin -g $graph -v 2238731 -w 2238731 --min_L 20 --min_R 1 $other_option
-elif [ $1 = "com" ]; then
-	# mpiexec -n $node_num $bin -g $graph -v 3072441  -w 3072441  --min_L 20 --min_R 5 $other_option
-	$nvprof $bin -g $graph -v 3072441 -w 3072441 --min_L 20 --min_R 1 $other_option
-elif [ $1 = "twt" ]; then
-	mpiexec -n $node_num $bin -g $graph -v 41652230 -w 41652230 --min_L 20 --min_R 5 $other_option
+if [ $GRAPH_NAME = "wiki" ]; then
+	V_NUM=7115 W_NUM=$V_NUM MIN_L=20 MIN_R=1	
+elif [ $GRAPH_NAME = "ytb" ]; then
+	V_NUM=1138499  W_NUM=$V_NUM MIN_L=20 MIN_R=10
+elif [ $GRAPH_NAME = "soc" ]; then
+	V_NUM=1632803  W_NUM=$V_NUM MIN_L=20 MIN_R=5
+elif [ $GRAPH_NAME = "LJ" ]; then
+	V_NUM=2238731 W_NUM=$V_NUM MIN_L=20 MIN_R=5
+elif [ $GRAPH_NAME = "com" ]; then
+	V_NUM=3072441  W_NUM=$V_NUM MIN_L=20 MIN_R=5 
+elif [ $GRAPH_NAME = "twt" ]; then
+	V_NUM=41652230  W_NUM=$V_NUM  MIN_L=20 MIN_R=5
 fi
 
-echo $sync_size_cal
+SAMPLE_ARGS="-g $GRAPH \
+	-v $V_NUM \
+	-w $W_NUM \
+	--min_L $MIN_L \
+	--min_R $MIN_R \
+	-o ./out/$GRAPH_NAME \
+	--make-undirected"
+
+LEARNING_ARGS="-emb_output ./out/${GRAPH_NAME}_emb.txt \
+	 	-size 100 \
+		-iter 3 \
+		-threads 10 \
+		-window 10 \
+		-negative 5 \
+		-batch-size 21 \
+		-min-count 0 \
+		-sample 1e-3 \
+		-alpha 0.01 \
+		-debug 2 \
+		-sync-size $sync_size_cal"
+
+mpirun $OPENMPI_CONFIG_ARGS \
+	$DISTRIBUTE_ARGS \
+	-npernode $NODE_NUM \
+	$BIN \
+	$SAMPLE_ARGS \
+	$LEARNING_ARGS 
