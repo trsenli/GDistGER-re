@@ -788,6 +788,7 @@ void SaveVocab() {
   for (i = 0; i < vocab_size; i++) fprintf(fo, "%s %lld\n", vocab[i].word, vocab[i].cn);
   fclose(fo);
 }
+vector<vertex_id_t> id2offset;
 void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
   vertex_id_t v_num = degrees.size();
   long long a, i = 0;
@@ -806,6 +807,12 @@ void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
     printf("Vocab size: %lld\n", vocab_size);
     printf("Words in train file: %lld\n", train_words);
   }
+  id2offset.resize(vocab_size);
+  for(vertex_id_t vi = 0; vi<vocab_size; vi++){
+    char* endptr;
+    vertex_id_t nid = (vertex_id_t)strtoul(vocab[vi].word,&endptr,10);
+    id2offset[nid] = vi;
+  } 
 }
 
 void ReadVocab() {
@@ -1214,6 +1221,19 @@ float cos_sim(float* v1,float* v2, int dim){
   v2_l2 = sqrt(v2_l2);
   return dot_product/(v1_l2 * v2_l2);
 }
+float node_neighbour_average_cos_sim(vertex_id_t v_id,myEdgeContainer*csr){
+  float sum_cos_sim = 0.0f;
+  int nei_n = csr->adj_lists[v_id].end - csr->adj_lists[v_id].begin;
+  // 1. get neighbour set;
+  for(auto it = csr->adj_lists[v_id].begin; it < csr->adj_lists[v_id].end; it++){
+    vertex_id_t nei = it->neighbour;
+    vertex_id_t v_1 = id2offset[v_id];
+    vertex_id_t v_2 = id2offset[nei];
+    float sim = cos_sim(syn0+v_1 * layer1_size, syn0+v_2*layer1_size,layer1_size);
+    sum_cos_sim += sim;
+  }
+  return sum_cos_sim / nei_n;
+}
 
 float find_supernode_topK_accurancy(float p,int k,myEdgeContainer*csr){
   float top_sum = 0;
@@ -1282,6 +1302,45 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   // float acc = find_supernode_topK_accurancy(0.01,10,csr);
   //
   // cout << "find super node topK acc: " << acc << endl;
+
+  FILE* f_nei_cos_sim = fopen("neighbour_average_cos_sim.txt","w");
+  vector<vector<float>>node_neighbour_average_cos_sim_array(vocab_size);
+  int n2 = 2;
+  while(n2++ < 30){
+    char fc[100];
+    sprintf(fc,"./out/tmp-0-%d.txt",n2);
+    alpha = lr_scheduler->get_lr();
+    TrainModelThread(fc);
+    std::cout << std::endl;
+    for(vertex_id_t v = 0;v < vocab_size; v++){
+      float s = node_neighbour_average_cos_sim(v,csr);
+      node_neighbour_average_cos_sim_array[v].push_back(s);
+    }
+  }
+  for(vertex_id_t i = 0; i < vocab_size; i++){
+    for(int j = 0; j < node_neighbour_average_cos_sim_array[i].size();j++){
+      fprintf(f_nei_cos_sim, "%.3f ",node_neighbour_average_cos_sim_array[i][j]);
+    }
+    fprintf(f_nei_cos_sim,"\n");
+  }
+  fclose(f_nei_cos_sim);
+  float p = 0.6;
+  vector<bool> flag(vocab_size,true);
+  int sum_count = 0;
+  for(int s = 0;s < node_neighbour_average_cos_sim_array[0].size();s++){
+    int count = 0;
+    for(vertex_id_t v = 0;v < vocab_size;v++){
+      if(node_neighbour_average_cos_sim_array[s][v] > p && flag[v] == true){
+        count++;
+        flag[v] = false;
+      }
+    }
+    cout <<count <<" ";
+    sum_count+=count;
+  }
+  cout << " sum: "<< sum_count << endl;
+  return;
+
   FILE* f_topk = fopen("super_topK.txt","w");
   int n1 = 2;
   while(n1++<30){
