@@ -49,6 +49,11 @@ bool hasResource = false;
 extern volatile bool stop_sampling_flag;
 const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
 
+float model_sync_period = 0.1f;
+mutex sync_mtx;
+condition_variable sync_cv;
+bool trainBlocked = false;
+
 struct vocab_word {
   long long cn;
   int *point;
@@ -959,6 +964,26 @@ void sgKernel(int *d_sen, int *d_sent_len, int *d_negSample, float alpha, int cn
     }
   }
 }
+volatile bool halt_sync = false;
+void sync_embedding_func()
+{
+  chrono::steady_clock::time_point syncTime = chrono::steady_clock::now() + chrono::milliseconds(100);
+  int sync_time = 0;
+  while(!halt_sync)
+  {
+    unique_lock<std::mutex> lock(sync_mtx);
+    // wait_until syncTime.
+    sync_cv.wait_until(lock,syncTime);
+    // block the training thread;
+    trainBlocked = true;
+    // TODO: Synchronize the Embedding (sync0) in GPU;
+    // copyFrom GPU, MPI, write back to GPU 
+    printf("syncing %d \n",sync_time++);
+    syncTime = chrono::steady_clock::now() + chrono::milliseconds(100);
+    trainBlocked = false; // unblock the traing thread.
+    sync_cv.notify_one();
+  }
+}
 
 LR *lr_scheduler;
 void TrainModelThread(string data_path)
@@ -994,6 +1019,9 @@ void TrainModelThread(string data_path)
   fseek(fi, 0, SEEK_SET);
 
   while (1) {
+    unique_lock<mutex> lock(sync_mtx);
+    sync_cv.wait(lock,[]{return !trainBlocked;});// 没有阻塞的时候才训练
+                                                              
     if (word_count - last_word_count > 10000) {
       word_count_actual += word_count - last_word_count;
       last_word_count = word_count;
@@ -1250,6 +1278,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   vector<vector<float>>node_neighbour_average_cos_sim_array(vocab_size);
   int n2 = 2;
   float threshold = 0.6;
+  thread sync_thread(sync_embedding_func);
   while(stop_sampling_flag == false){
     unique_lock<mutex> lock(mtx);
     cv.wait(lock,[]{return hasResource;});
@@ -1267,6 +1296,8 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
     hasResource = false;
     cv.notify_one();
   }
+  halt_sync = true;
+  sync_thread.join();
   return;
 
   FILE* f_topk = fopen("super_topK.txt","w");
