@@ -5,6 +5,8 @@
 #include "graph.hpp"
 #include "path.hpp"
 
+#include <cstdio>
+#include <memory>
 #include <numeric>
 #include <vector>
 #include <unordered_map>
@@ -12,7 +14,12 @@
 #include <queue>
 #include <mutex>
 #include "shared.h"
+#include <condition_variable>
 
+extern vector<bool> flag;
+extern std::mutex mtx;
+extern std::condition_variable cv;
+extern bool hasResource ;
 using namespace std; 
 
 using precision_t = double;
@@ -549,6 +556,10 @@ private:
                         continue;
                     }
                     vertex_id_t start_v = walker_init_dist_func(w_i);
+                    // TODO: skip specific vertex 
+                    if(flag[start_v]==false){
+                      continue;
+                    }
                     Walker<walker_data_t> walker;
                     walker.id = w_i;
                     walker.step = 0;
@@ -608,6 +619,7 @@ public:
     template<typename query_data_t, typename response_data_t, typename transition_config_t>
     void internal_random_walk(WalkerConfig<edge_data_t, walker_data_t> *walker_config, transition_config_t *transition_config, WalkConfig* walk_config, int order)
     {
+        FILE* f_iter_walker_num = fopen("iter_walker_num.txt","w");
         typedef Walker<walker_data_t> walker_t;
         typedef Message<walker_t> walker_msg_t;
 
@@ -657,6 +669,9 @@ public:
             std::cout << "walk_data.active_walker_num = " << walk_data.active_walker_num << std::endl;
 
             walk_data.local_walker_num = init_walkers(walk_data.local_walkers, walk_data.local_walkers_bak, walker_begin, walker_begin + walk_data.active_walker_num, walker_config->walker_init_dist_func, walker_config->walker_init_state_func);
+            printf("\n【Round %d  Walker Num: %d】 \n",iter,walk_data.local_walker_num);
+            fprintf(f_iter_walker_num,"%d\n",walk_data.local_walker_num);
+            fflush(f_iter_walker_num);
 
             if (walk_data.collect_path_flag)
             {
@@ -687,7 +702,11 @@ public:
                     Timer timer_dump;
                     paths->dump(local_output_path.c_str(), "w", walk_config->print_with_head_info, context_map_freq,this->local_corpus,this->vertex_cn,this->co_occor);
                     this->other_time += timer_dump.duration();
+                    unique_lock<mutex> lock(mtx);
+                    cv.wait(lock,[]{return !hasResource;});
+                    hasResource = true;
                     this->out_queue.push(local_output_path);
+                    cv.notify_one();
                     cout<< "=========== [ PUSH " << local_output_path <<"]======" <<endl;
                     
                     MPI_Allreduce(context_map_freq.data(),  this->vertex_freq, this->v_num, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_COMM_WORLD);
@@ -737,7 +756,8 @@ public:
                     //     printf("[ %d ] STOP_SAMPLING_FLAG SET \n",get_mpi_rank());
                     //     terminal_flag = true;
                     // }
-                    if(iter > 30){ // TEST 看看 30 轮的相对熵怎么变化的。
+                    // TODO : 动态决定每个图的收敛数量
+                    if(walk_data.local_walker_num < 1000){ // TEST 看看 30 轮的相对熵怎么变化的。
                         stop_sampling_flag = true;
                         terminal_flag = true;
                         remained_walker = 0;
@@ -779,6 +799,7 @@ public:
 
         this->dealloc_array(walk_data.local_walkers, walker_array_size);
         this->dealloc_array(walk_data.local_walkers_bak, walker_array_size);
+        fclose(f_iter_walker_num);
     }
 
     void internal_random_walk_wrap (WalkerConfig<edge_data_t, walker_data_t> *walker_config, TransitionConfig<edge_data_t, walker_data_t> *transition_config, WalkConfig *walk_config)

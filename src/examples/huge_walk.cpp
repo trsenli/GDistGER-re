@@ -62,9 +62,8 @@ int main(int argc, char **argv)
     // TODO: replace csr to g_csr
     cout <<"myec access " << myec-> adj_lists[110].begin->neighbour<<endl; 
     cout <<"graph.csr access " << graph.csr-> adj_lists[110].begin->neighbour<<endl; 
-    train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue,my_rank,myec);
-    return 0;
-    // thread train_thread(train_corpus_cuda,argc,argv,std::ref(vertex_degree),std::ref(graph.out_queue), my_rank);
+    //train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue,my_rank,myec);
+    thread train_thread(train_corpus_cuda,argc,argv,std::ref(vertex_degree),std::ref(graph.out_queue), my_rank,myec);
     // * 
 
     auto extension_comp = [&](Walker<uint32_t> &walker, vertex_id_t current_v)
@@ -125,7 +124,7 @@ int main(int argc, char **argv)
     // ================= annotation line ====================
 
     
-    // train_thread.join();
+    train_thread.join();
     printf("> [p%d WHOLE TIME:] %lf \n",get_mpi_rank(), timer.duration());
     // train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue);
     // dsgl(argc, argv,&graph.vertex_cn,&graph.new_sort,&graph);

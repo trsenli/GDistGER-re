@@ -1,4 +1,6 @@
+#include <condition_variable>
 #include <cstdio>
+#include <mutex>
 #include <queue>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +9,7 @@
 #include <cmath>
 #include <cuda_runtime.h>
 #include "type.hpp"
+#include <type_traits>
 #include <vector>
 #include <stdexcept>
 #include <string>
@@ -39,7 +42,11 @@ using std::endl;
   }\
 }
 
-
+vector<bool> flag;
+std::mutex mtx;
+std::condition_variable cv;
+bool hasResource = false;
+extern volatile bool stop_sampling_flag;
 const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
 
 struct vocab_word {
@@ -1208,7 +1215,6 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   ReadVocabFromDegree(g_v_degree);
   printf("========================Read Vocab ok=======================\n");
   printf("vocab_size: %lu\n",vocab_size);
-
   // for(size_t i = 0; i < vocab_size * 0.10;i++){
   //   printf("id: %s, degree: %ld\n",vocab[i].word,vocab[i].cn);
   // }
@@ -1243,39 +1249,24 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   FILE* f_nei_cos_sim = fopen("neighbour_average_cos_sim.txt","w");
   vector<vector<float>>node_neighbour_average_cos_sim_array(vocab_size);
   int n2 = 2;
-  while(n2++ < 30){
-    char fc[100];
-    sprintf(fc,"./out/tmp-0-%d.txt",n2);
+  float threshold = 0.6;
+  while(stop_sampling_flag == false){
+    unique_lock<mutex> lock(mtx);
+    cv.wait(lock,[]{return hasResource;});
+    string str = taskq.pop();
+    cout << "====== pop " << str <<" ===" << endl;
     alpha = lr_scheduler->get_lr();
-    TrainModelThread(fc);
+    TrainModelThread(str);
     std::cout << std::endl;
     for(vertex_id_t v = 0;v < vocab_size; v++){
-      float s = node_neighbour_average_cos_sim(v,csr);
-      node_neighbour_average_cos_sim_array[v].push_back(s);
-    }
-  }
-  for(vertex_id_t i = 0; i < vocab_size; i++){
-    for(int j = 0; j < node_neighbour_average_cos_sim_array[i].size();j++){
-      fprintf(f_nei_cos_sim, "%.3f ",node_neighbour_average_cos_sim_array[i][j]);
-    }
-    fprintf(f_nei_cos_sim,"\n");
-  }
-  fclose(f_nei_cos_sim);
-  float p = 0.6;
-  vector<bool> flag(vocab_size,true);
-  int sum_count = 0;
-  for(int s = 0;s < node_neighbour_average_cos_sim_array[0].size();s++){
-    int count = 0;
-    for(vertex_id_t v = 0;v < vocab_size;v++){
-      if(node_neighbour_average_cos_sim_array[s][v] > p && flag[v] == true){
-        count++;
-        flag[v] = false;
+      if(flag[v]== true){
+        float s = node_neighbour_average_cos_sim(v,csr);
+        if(s > threshold) flag[v] = false;
       }
     }
-    cout <<count <<" ";
-    sum_count+=count;
+    hasResource = false;
+    cv.notify_one();
   }
-  cout << " sum: "<< sum_count << endl;
   return;
 
   FILE* f_topk = fopen("super_topK.txt","w");
@@ -1411,7 +1402,7 @@ int ArgPos(char *str, int argc, char **argv) {
 }
 int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer* csr) {
 
-  printf("No.10%: %llu\n",degrees[degrees.size() * 0.03]);
+  flag.assign(degrees.size(),true);
   // test area 
 
   // test __global__ void cosine_similarity_kernel(float *d_vectors, float *d_result, int v, int dim){
