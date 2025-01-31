@@ -14,8 +14,6 @@
 #include <thread>
 #include <chrono>
 #include <unistd.h>
-#include "shared.h"
-#include "hnswlib.h"
 #include "edge_container.hpp"
 #include "lr_scheduler.hpp"
 #include <algorithm>
@@ -1148,67 +1146,6 @@ void myIntersectition(const vector<vertex_id_t>& v1,const vector<vertex_id_t>& v
    
 }
 
-float count_ann_intersection(float percent,myEdgeContainer* csr){
-  float count = 0;
-  float search_sum = 0;
-  // build hnswlib index
-  int dim = layer1_size; 
-  int max_elements = vocab_size;
-  int M = 12;// 控制构建图中每个节点的最大邻居数，M 大图更稠密，搜索进度高，但是内存大，构图时间长。通常 12～48
-  int ef_construction = 50; // 控制构图质量，越高，图质量高，搜索精度高，但是构图时间长。
-  
-  hnswlib::L2Space space(dim);
-  hnswlib::HierarchicalNSW<float>* alg_hnsw = new hnswlib::HierarchicalNSW<float>(&space,max_elements, M,ef_construction);
-
-  // 添加向量索引
-  for(int i =0; i < max_elements;i++){
-      alg_hnsw->addPoint(syn0+ i * dim,i);
-  } 
-
-  // count ann intersection of top 10% node
-  for(size_t i = 0; i < vocab_size * percent; i++){
-    char* endptr;
-    // TODO: 设置一个上线，而不是真实的邻居数。设置大概 20，30
-    vertex_id_t search_num = vocab[i].cn > 20 ? 20 : vocab[i].cn;
-    search_sum += search_num;
-    // 索引 i 的真实 node id
-    vertex_id_t nid = (vertex_id_t)strtoul(vocab[i].word,&endptr,10);
-    if(*endptr != '\0'){
-      printf("Conversion failed. Invalid character: %c\n",*endptr);
-    }
-    auto result = alg_hnsw->searchKnn(syn0+i*dim,search_num);
-    vector<vertex_id_t> ann_neighbor;
-    while(!result.empty()){
-      // result.top().second 是 ann 中的索引，还要转换成 node id。
-      vertex_id_t ann_nei_id = (vertex_id_t)strtoul(vocab[result.top().second].word,&endptr,10);
-      ann_neighbor.push_back(ann_nei_id);
-      result.pop();
-    }
-    vector<vertex_id_t> real_neighbor;
-    for(auto it = csr->adj_lists[nid].begin; it < csr->adj_lists[nid].end; it++){
-      real_neighbor.push_back(it->neighbour);
-    }
-    sort(ann_neighbor.begin(),ann_neighbor.end());
-    sort(real_neighbor.begin(),real_neighbor.end());
-    // cout <<endl<< "ann: ";
-    // for(auto it:ann_neighbor){
-    //   cout << it <<" ";
-    // }  
-    // cout << endl;
-    // cout << " real: ";
-    // for(auto it: real_neighbor){
-    //   cout << it <<" ";
-    // }
-    // cout << endl;
-    vector<vertex_id_t> result_neighbor;
-    myIntersectition(ann_neighbor,real_neighbor,result_neighbor);
-    // count += result_neighbor.size();
-    // cout << result_neighbor.size()<<"/"<<search_num<<" ";
-    // break;
-  }
-  // cout<< "count: " << count <<" sum: " <<search_sum << " acc: "<< count/search_sum <<endl;
-  return count/search_sum;
-}
 float cos_sim(float* v1,float* v2, int dim){
   float dot_product = 0.0;
   float v1_l2 = 0.0, v2_l2 = 0.0;
@@ -1357,19 +1294,6 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   return;
 
   // [Test]
-  FILE* f_ann = fopen("ann_accuracy.txt","w");
-  int n = 2;
-  while(n++<30){
-    char fc[100];
-    sprintf(fc,"./out/ytb-0-%d.txt",n);
-    alpha = lr_scheduler->get_lr();
-    TrainModelThread(fc);
-    std::cout << std::endl;
-    float acc = count_ann_intersection(0.01,csr);
-    fprintf(f_ann,"%f\n",acc);
-  }
-  fclose(f_ann);
-  return;
   
   //compute_kl_from_emb(last_emb,syn0, kl,tmpN,layer1_size);
   //std::cout << std::endl;

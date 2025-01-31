@@ -2,8 +2,6 @@
 #include "option_helper.hpp"
 #include <string>
 #include <vector>
-#include <thread>
-#include "hnswlib.h"
 #include "edge_container.hpp"
 
 // #include "dsgl.hpp"
