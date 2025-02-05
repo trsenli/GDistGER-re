@@ -1,15 +1,15 @@
 #include <condition_variable>
 #include <cstdio>
 #include <mutex>
-#include <queue>
+#include <random>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <cmath>
 #include <cuda_runtime.h>
+#include "gemini/core/mpi.hpp"
 #include "type.hpp"
-#include <type_traits>
 #include <vector>
 #include <stdexcept>
 #include <string>
@@ -20,6 +20,7 @@
 #include "edge_container.hpp"
 #include "lr_scheduler.hpp"
 #include <algorithm>
+#include <mpi.h>
 
 using std::vector;
 using std::string;
@@ -48,6 +49,11 @@ std::condition_variable cv;
 bool hasResource = false;
 extern volatile bool stop_sampling_flag;
 const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
+                                  
+
+MPI_Comm MPI_EMB_COMM;
+int num_procs = 1;
+int my_rank = 0;
 
 float model_sync_period = 0.1f;
 mutex sync_mtx;
@@ -60,7 +66,6 @@ struct vocab_word {
   char *word, *code, codelen;
 };
 
-int my_rank;
 float *last_emb;
 
 char train_file[MAX_STRING], output_file[MAX_STRING];
@@ -969,20 +974,79 @@ void sync_embedding_func()
 {
   chrono::steady_clock::time_point syncTime = chrono::steady_clock::now() + chrono::milliseconds(100);
   int sync_time = 0;
-  while(!halt_sync)
+  int sync_node_num;
+  vector<vertex_id_t> sync_vocab_id_array; // vocab id is not node id. It's the idx in the vpcab
+  if(my_rank == 0)
   {
-    unique_lock<std::mutex> lock(sync_mtx);
-    // wait_until syncTime.
-    sync_cv.wait_until(lock,syncTime);
-    // block the training thread;
-    trainBlocked = true;
-    // TODO: Synchronize the Embedding (sync0) in GPU;
-    // copyFrom GPU, MPI, write back to GPU 
-    printf("syncing %d \n",sync_time++);
-    syncTime = chrono::steady_clock::now() + chrono::milliseconds(100);
-    trainBlocked = false; // unblock the traing thread.
-    sync_cv.notify_one();
+    vector<vertex_id_t> degree_range(vocab_size);
+    degree_range[0] = 0;
+    vertex_id_t n = 1;
+    for(vertex_id_t vi = 1; vi < vocab_size;vi++){
+      if(vocab[vi].cn != vocab[vi-1].cn){
+        degree_range[n] = vi;
+        n++;
+      }
+    }
+    degree_range[n]  = vocab_size;
+    random_device rd;
+    mt19937 gen(rd());
+    for(vertex_id_t v = 1; v <= n; v++)
+    {
+      cout << degree_range[v] << " ";
+      uniform_int_distribution<>dis(degree_range[v-1],degree_range[v]-1); 
+      sync_vocab_id_array.push_back(dis(gen));
+    }
+    sync_node_num = sync_vocab_id_array.size();
   }
+  MPI_Bcast(&sync_node_num,1,get_mpi_data_type<int>(),0,MPI_EMB_COMM);
+  if(my_rank != 0)
+  {
+    sync_vocab_id_array.resize(sync_node_num);
+  }
+  MPI_Bcast(sync_vocab_id_array.data(), sync_node_num, get_mpi_data_type<int>(), 0, MPI_EMB_COMM);
+  // TODO: copy from GPU 
+  // TODO: MPI_Allreduce xxx
+  printf("[ %d ] sync_vocab_id_array size: %ld\n",my_rank,sync_vocab_id_array.size());
+  float *h_sync_emb_buffer = (float*)malloc(sync_node_num * layer1_size *sizeof(float));
+  if(h_sync_emb_buffer == NULL){
+    printf("[ %d ] ERROR. malloc h_sync_emb_buffer fail\n",my_rank);
+  }
+  for(vertex_id_t i =0; i < sync_vocab_id_array.size();i++){
+    checkCUDAerr(cudaMemcpy(h_sync_emb_buffer+i *layer1_size,
+          d_syn0 + sync_vocab_id_array[i]*layer1_size,
+          layer1_size * sizeof(float), cudaMemcpyDeviceToHost));
+  }
+  checkCUDAerr(cudaDeviceSynchronize());
+  MPI_Allreduce(MPI_IN_PLACE, h_sync_emb_buffer,sync_node_num * layer1_size , MPI_FLOAT, MPI_SUM, MPI_EMB_COMM);
+  for(vertex_id_t i = 0; i < sync_node_num * layer1_size; i++){
+    h_sync_emb_buffer[i] /= num_procs;
+  }
+  for(vertex_id_t i =0; i < sync_vocab_id_array.size();i++){
+    checkCUDAerr(cudaMemcpy( d_syn0 +sync_vocab_id_array[i]*layer1_size,
+          h_sync_emb_buffer+i *layer1_size,
+          layer1_size * sizeof(float), cudaMemcpyHostToDevice));
+  }
+  checkCUDAerr(cudaDeviceSynchronize());
+  printf("[ %d ] copy ok\n",my_rank);
+  return;
+  // while(!halt_sync)
+  // {
+  //   cout << " get in the while\n";
+  //   // unique_lock<std::mutex> lock(sync_mtx);
+  //   // wait_until syncTime.
+  //   // sync_cv.wait_until(lock,syncTime);
+  //   // block the training thread;
+  //   trainBlocked = true;
+  //   // TODO: Synchronize the Embedding (sync0) in GPU;
+  //   // copyFrom GPU, MPI, write back to GPU 
+  //   // TODO: pick up the sync id;
+  //
+  //
+  //   printf("syncing %d \n",sync_time++);
+  //   syncTime = chrono::steady_clock::now() + chrono::milliseconds(100);
+  //   trainBlocked = false; // unblock the traing thread.
+  //   sync_cv.notify_one();
+  // }
 }
 
 LR *lr_scheduler;
@@ -1269,10 +1333,18 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   // lr_scheduler = new  StepDecayLR(0.025,0.5,3);
   lr_scheduler = new ExponentialDecayLR(0.025,0.1);
 
-  // TrainModelThread("./out/tmp-0-1.txt");
-  // float acc = find_supernode_topK_accurancy(0.01,10,csr);
-  //
-  // cout << "find super node topK acc: " << acc << endl;
+  int nu = 1;
+
+  sync_embedding_func();
+  printf("[ %d ] sync_emb_func after\n",my_rank);
+  // while(nu++ <=1){
+  //   char fc[100];
+  //   sprintf(fc,"./out/wiki-0-%d.txt",nu);
+  //   alpha = lr_scheduler->get_lr();
+  //   TrainModelThread(fc);
+  //   std::cout << std::endl;
+  // }
+  return ;
 
   FILE* f_nei_cos_sim = fopen("neighbour_average_cos_sim.txt","w");
   vector<vector<float>>node_neighbour_average_cos_sim_array(vocab_size);
@@ -1431,7 +1503,19 @@ int ArgPos(char *str, int argc, char **argv) {
   }
   return -1;
 }
-int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer* csr) {
+int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer* csr) 
+{
+
+  char hostname[MPI_MAX_PROCESSOR_NAME];
+  int hostname_len;
+
+  cout <<_my_rank << " train_corpus_cuda invoke ok\n";
+  MPI_Comm_dup(MPI_COMM_WORLD,&MPI_EMB_COMM);
+  MPI_Comm_size(MPI_EMB_COMM, &num_procs);
+  MPI_Comm_rank(MPI_EMB_COMM, &my_rank);
+  MPI_Get_processor_name(hostname, &hostname_len);
+
+  printf("processor name: %s, number of processors: %d, rank: %d\n", hostname, num_procs, my_rank);
 
   flag.assign(degrees.size(),true);
   // test area 
@@ -1498,7 +1582,6 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
 
   // end test area
 
-  my_rank = _my_rank;
   g_v_degree.assign(degrees.begin(), degrees.end());
   printf("train_corpus_Cuda calling!!!!\n");
   int i;
@@ -1582,6 +1665,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
 
   TrainModel(corpus_q,csr);
 
+  printf("[ %d ] TrainModel after\n",my_rank);
   // memory free
   free(vocab_codelen);
   free(vocab_point);
@@ -1595,6 +1679,8 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   free(expTable);
   cudaFree(d_expTable);
   free(last_emb);
+  printf("[ %d ] free after\n",my_rank);
+  
 
   return 0;
 }

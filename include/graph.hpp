@@ -194,7 +194,7 @@ public:
     // global graph csr
     EdgeContainer<edge_data_t> *g_csr;
 
-    CoOccorCsr *co_occor;
+    CoOccorCsr *co_occor = nullptr;
 
 protected:
 
@@ -506,6 +506,39 @@ public:
          }
      }
 
+    void build_all_edge_container_single(Edge<edge_data_t> *edges, edge_id_t edge_num, EdgeContainer<edge_data_t> *ec, vertex_id_t* vertex_out_degree)
+    {
+
+        ec->adj_lists = new AdjList<edge_data_t>[v_num];
+
+        ec->adj_units = new AdjUnit<edge_data_t>[edge_num];
+        edge_id_t chunk_edge_idx = 0;
+        for (vertex_id_t v_i = 0; v_i < this->v_num;v_i++)
+        {
+            ec->adj_lists[v_i].begin = ec->adj_units + chunk_edge_idx;
+            ec->adj_lists[v_i].end = ec->adj_lists[v_i].begin;
+
+            chunk_edge_idx += vertex_out_degree[v_i];
+        }
+
+        for (edge_id_t e_i = 0; e_i < edge_num; e_i++)
+        {
+            auto e = edges[e_i];
+            auto ep = ec->adj_lists[e.src].end ++;
+           
+            ep->neighbour = e.dst;
+            
+            if (!std::is_same<edge_data_t, EmptyData>::value)
+            {
+                ep->data = e.data;
+                // std::cout << e.data << endl;
+            }else{
+                std::cout << " no common neighbor " << std::endl;
+                exit(0);
+            }
+        }
+    }
+
     void build_edge_container(Edge<edge_data_t> *edges, edge_id_t local_edge_num, EdgeContainer<edge_data_t> *ec, vertex_id_t* vertex_out_degree)
     {
 
@@ -795,19 +828,17 @@ public:
 
         Edge<edge_data_t> *local_edges = new Edge<edge_data_t>[local_e_num];
 
-        shuffle_edges(read_edges, read_e_num, local_edges, local_e_num);
+        // shuffle_edges(read_edges, read_e_num, local_edges, local_e_num);
 
         this -> csr = new EdgeContainer<edge_data_t>();
-        this-> co_occor = new CoOccorCsr();
-        build_edge_container(local_edges, local_e_num, this->csr, vertex_out_degree);
-        // printf("co_coccor build before====ok\n");
-         //g_build_edge_container(g_read_edges,g_read_e_num,v_num,this->g_csr,vertex_out_degree);
-        g_build_edge_container(local_edges,local_e_num,vertex_out_degree);
-        // printf("co_coor build====ok\n");
+
+        // build_edge_container(local_edges, local_e_num, this->csr, vertex_out_degree); // load partial edges
+        build_all_edge_container_single(read_edges, read_e_num , this->csr,vertex_out_degree);
+        printf("[ %d ] All edges CSR build success\n",local_partition_id);
         // printEdgeContainer(this->csr->adj_lists);
 
         delete []read_edges;
-        delete []local_edges;
+        // delete []local_edges;
         
         send_locks = new std::mutex[partition_num];
         recv_locks = new std::mutex[partition_num];

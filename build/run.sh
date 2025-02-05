@@ -29,7 +29,7 @@ GRAPH_PREFIX=/home/lzl/nfs.d/dataset/original_bin
 TRAIN_GRAPH=../dataset/train_bin/$1_train.data
 NODE_NUM=1
 
-#DISTRIBUTE_ARGS="-hostfile ./hosts "
+DISTRIBUTE_ARGS="-hostfile ./hosts "
 OPENMPI_CONFIG_ARGS=" -mca btl ^openib -mca mtl ^ofi -mca btl_tcp_if_include ens17f0 "
 GRAPH_NAME=$1
 GRAPH=$GRAPH_PREFIX/${GRAPH_NAME}.data
