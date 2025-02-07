@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include "edge_container.hpp"
 #include "lr_scheduler.hpp"
+#include "util.hpp"
 #include <algorithm>
 #include <mpi.h>
 
@@ -36,6 +37,7 @@ using std::endl;
 
 #define EVALUATION_NEIGHBOUR_NUM 30
 #define NODE_TRAINING_CONVERGE_THRESHOLD 0.6
+#define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.8
 
 #define MAX_SENTENCE 15000
 #define checkCUDAerr(err) {\
@@ -46,7 +48,7 @@ using std::endl;
   }\
 }
 
-vector<bool> flag;
+vector<int> vertex_walker_stop_flag;
 std::mutex mtx;
 std::condition_variable cv;
 bool hasResource = false;
@@ -973,17 +975,27 @@ void sgKernel(int *d_sen, int *d_sent_len, int *d_negSample, float alpha, int cn
   }
 }
 volatile bool halt_sync = false;
+volatile bool pause_sync = false;
 void sync_embedding_func()
 {
   chrono::steady_clock::time_point syncTime = chrono::steady_clock::now() + chrono::milliseconds(100);
   int sync_times = 1;
   while(!halt_sync)
   {
+    if(true == pause_sync) {
+      syncTime = chrono::steady_clock::now() + chrono::milliseconds(100); // next sync time.
+    }
     unique_lock<std::mutex> lock(sync_mtx);
     //wait_until syncTime.
     sync_cv.wait_until(lock,syncTime);
-    //block the training thread; 
+
     if(halt_sync == true) break;
+
+    if(true == pause_sync) {
+      syncTime = chrono::steady_clock::now() + chrono::milliseconds(100); // next sync time.
+      continue;
+    }
+    //block the training thread; 
     trainBlocked = true;
 
     // copyFrom GPU, MPI, write back to GPU 
@@ -1258,7 +1270,60 @@ float cos_sim(float* v1,float* v2, int dim){
   v2_l2 = sqrt(v2_l2);
   return dot_product/(v1_l2 * v2_l2);
 }
-float node_neighbour_average_cos_sim(vertex_id_t v_id,myEdgeContainer*csr){
+__global__ void vector_cosine_similarity_kernel(
+    const float* d_A,
+    const float* d_B,
+    float* d_results,
+    int vector_length
+    ){
+  int i = blockIdx.x; // 第 i 个向量对（ 2～29 )
+  int tid = threadIdx.x; // 线程号（0～blockDim.x -1 )
+  extern __shared__ float s_data[]; // 动态共享内存
+  float* s_dot = s_data;
+  float* s_A2 = &s_data[blockDim.x];
+  float* s_B2 = &s_data[2 * blockDim.x];
+
+  // 初始化
+  float a = 0.0f, b = 0.0f;
+  if(tid < vector_length) {
+    a = d_A[i * vector_length + tid];
+    b = d_B[i * vector_length + tid];
+  }
+  // 计算点积平方和
+  s_dot[tid] = a * b;
+  s_A2[tid] = a * a;
+  s_B2[tid] = b * b;
+
+  __syncthreads();
+
+  // 规约求和（树装规约）
+  for(int stride = blockDim.x / 2; stride > 0; stride >>= 1){
+    if(tid < stride){
+      s_dot[tid] += s_dot[tid + stride];
+      s_A2[tid] += s_A2[tid + stride];
+      s_B2[tid] += s_B2[tid + stride];
+    }
+    __syncthreads();
+  }
+  // 计算余弦相似度（仅由线程0完成）
+  if(tid == 0) {
+    float sum_dot = s_dot[0];
+    float sum_A2 = s_A2[0];
+    float sum_B2 = s_B2[0];
+
+    float norm_A = sqrtf(sum_A2);
+    float norm_B = sqrtf(sum_B2);
+
+    // 处理零向量
+    if (norm_A == 0 || norm_B == 0){
+      d_results[i] = 0.0f;
+    } else {
+      d_results[i] = sum_dot / (norm_A * norm_B);
+    }
+  }
+}
+
+float node_neighbour_average_cos_sim(vertex_id_t v_id,myEdgeContainer*csr,float* d_A,float* d_B,float* d_results){
   float sum_cos_sim = 0.0f;
   int nei_n = csr->adj_lists[v_id].end - csr->adj_lists[v_id].begin;
   //  Get neighbour set; If neighbour amout > 30,then chose thiry randomly
@@ -1266,20 +1331,43 @@ float node_neighbour_average_cos_sim(vertex_id_t v_id,myEdgeContainer*csr){
   for(auto it = csr->adj_lists[v_id].begin; it < csr->adj_lists[v_id].end; it++){
     neighbor_set.push_back(it->neighbour);
   }
-  if(neighbor_set.size() > EVALUATION_NEIGHBOUR_NUM){
+  int evaluate_num = neighbor_set.size();
+  if(evaluate_num > EVALUATION_NEIGHBOUR_NUM){
+    evaluate_num = EVALUATION_NEIGHBOUR_NUM;
     std::random_device rd;
     std::mt19937 g(rd());
     shuffle(neighbor_set.begin(), neighbor_set.end(), g);
   }
-  int end = neighbor_set.size() > EVALUATION_NEIGHBOUR_NUM ? EVALUATION_NEIGHBOUR_NUM : neighbor_set.size();
-  for(int i =0; i < end; i++){
+
+  for(int i =0; i < evaluate_num; i++){
     vertex_id_t nei = neighbor_set[i];
     vertex_id_t v_1 = id2offset[v_id];
     vertex_id_t v_2 = id2offset[nei];
-    float sim = cos_sim(syn0+v_1 * layer1_size, syn0+v_2*layer1_size,layer1_size);
-    sum_cos_sim += sim;
+    checkCUDAerr(
+        cudaMemcpy(d_A + i*layer1_size, d_syn0+v_1*layer1_size, layer1_size*sizeof(float), cudaMemcpyDeviceToDevice);
+        );
+    checkCUDAerr(
+        cudaMemcpy(d_B + i*layer1_size, d_syn0+v_2*layer1_size, layer1_size*sizeof(float), cudaMemcpyDeviceToDevice);
+        );
+    // float sim = cos_sim(syn0+v_1 * layer1_size, syn0+v_2*layer1_size,layer1_size);
+    // sum_cos_sim += sim;
   }
-  return sum_cos_sim / nei_n;
+  int threadsPerBlock = layer1_size > 200 ? 256 : 128;
+  int blocks = evaluate_num;
+  size_t sharedMemSize = 3 * threadsPerBlock * sizeof(float);
+  vector_cosine_similarity_kernel<<<blocks,threadsPerBlock,sharedMemSize>>>(d_A, d_B, d_results, 100);
+  cudaDeviceSynchronize();
+  float* h_results = new float[evaluate_num];
+  cudaMemcpy(h_results,d_results,evaluate_num*sizeof(float),cudaMemcpyDeviceToHost);
+  float cuda_cos_sim = 0.0f;
+  for(int i =0;i < evaluate_num; i++){
+    cuda_cos_sim  += h_results[i];
+  }
+  
+  cuda_cos_sim /= evaluate_num;
+  float cpu_cos_sim = sum_cos_sim / nei_n;
+  // printf("[ %d ] vid: %u cuda: %f cpu: %f\n",my_rank,v_id,cuda_cos_sim,cpu_cos_sim);
+  return  cuda_cos_sim;
 }
 
 float find_supernode_topK_accurancy(float p,int k,myEdgeContainer*csr){
@@ -1346,19 +1434,43 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
 
   int nu = 1;
 
+  vertex_id_t part_vertex_num = ((vocab_size % num_procs) > 0) ? (vocab_size / num_procs + 1) : (vocab_size / num_procs); 
+  float *d_A, *d_B, *d_results;
+  checkCUDAerr(cudaMalloc(&d_A, EVALUATION_NEIGHBOUR_NUM * layer1_size *sizeof(float)));
+  checkCUDAerr(cudaMalloc(&d_B, EVALUATION_NEIGHBOUR_NUM * layer1_size *sizeof(float)));
+  checkCUDAerr(cudaMalloc(&d_results, EVALUATION_NEIGHBOUR_NUM * sizeof(float)));
+
   thread sync_thread_test(sync_embedding_func);
-  while(nu++ <=1){
+  int last_eva_num = 0;
+  while(nu++ <=30){
     char fc[100];
     sprintf(fc,"./out/ytb-0-%d.txt",nu);
     alpha = lr_scheduler->get_lr();
+    pause_sync = false;
     TrainModelThread(fc);
+    MPI_Barrier(MPI_EMB_COMM);
+    pause_sync = true;
     std::cout << std::endl;
-    for(vertex_id_t v = 0;v < vocab_size; v++){
-      if(flag[v]== true){
-        float s = node_neighbour_average_cos_sim(v,csr);
-        if(s > NODE_TRAINING_CONVERGE_THRESHOLD) flag[v] = false;
+    Timer eva_timer;
+    int eva_num = 0;
+    for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
+      if(vertex_walker_stop_flag[v]== 0 ){
+        // TODO: distribute execute
+        float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
+        eva_num ++ ;
+        if(s > NODE_TRAINING_CONVERGE_THRESHOLD){
+          vertex_walker_stop_flag[v] = 1;
+        }
       }
     }
+    MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EMB_COMM);
+    // 收敛了，每次减少的比例不多
+    if( last_eva_num != 0 && ((float)eva_num / last_eva_num) > EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO ){
+      halt_sync = true;
+      break;
+    }
+    printf("[ %d ]Iter %d Evaluate Num: %d Evaluate time: %f s\n",my_rank,nu,eva_num,eva_timer.duration());
+    last_eva_num = eva_num;
   }
   MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
   halt_sync = true;
@@ -1366,7 +1478,12 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   printf("[ %d ] Waiting Syncing Thread\n",my_rank);
   sync_thread_test.join();
   printf("[ %d ] Syncing Thread Halt\n",my_rank);
+  cudaFree(d_A);
+  cudaFree(d_B);
+  cudaFree(d_results);
   return ;
+
+
 
   FILE* f_nei_cos_sim = fopen("neighbour_average_cos_sim.txt","w");
   vector<vector<float>>node_neighbour_average_cos_sim_array(vocab_size);
@@ -1379,12 +1496,14 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
     string str = taskq.pop();
     cout << "====== pop " << str <<" ===" << endl;
     alpha = lr_scheduler->get_lr();
+    pause_sync = false;
     TrainModelThread(str);
+    pause_sync = true;
     std::cout << std::endl;
     for(vertex_id_t v = 0;v < vocab_size; v++){
-      if(flag[v]== true){
-        float s = node_neighbour_average_cos_sim(v,csr);
-        if(s > threshold) flag[v] = false;
+      if(vertex_walker_stop_flag[v]== true){
+        float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
+        if(s > threshold) vertex_walker_stop_flag[v] = false;
       }
     }
     hasResource = false;
@@ -1540,8 +1659,9 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
 
   printf("processor name: %s, number of processors: %d, rank: %d\n", hostname, num_procs, my_rank);
 
-  flag.assign(degrees.size(),true);
+  vertex_walker_stop_flag.assign(degrees.size(),0);
   // test area 
+
 
   // test __global__ void cosine_similarity_kernel(float *d_vectors, float *d_result, int v, int dim){
   float h_vec[] = {1,2,3,1,4,1};

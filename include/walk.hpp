@@ -16,7 +16,7 @@
 #include "shared.h"
 #include <condition_variable>
 
-extern vector<bool> flag;
+extern vector<int> vertex_walker_stop_flag;
 extern std::mutex mtx;
 extern std::condition_variable cv;
 extern bool hasResource ;
@@ -557,7 +557,7 @@ private:
                     }
                     vertex_id_t start_v = walker_init_dist_func(w_i);
                     // TODO: skip specific vertex 
-                    if(flag[start_v]==false){
+                    if(vertex_walker_stop_flag[start_v]==1){
                       continue;
                     }
                     Walker<walker_data_t> walker;
