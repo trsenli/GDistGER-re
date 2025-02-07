@@ -973,80 +973,78 @@ volatile bool halt_sync = false;
 void sync_embedding_func()
 {
   chrono::steady_clock::time_point syncTime = chrono::steady_clock::now() + chrono::milliseconds(100);
-  int sync_time = 0;
-  int sync_node_num;
-  vector<vertex_id_t> sync_vocab_id_array; // vocab id is not node id. It's the idx in the vpcab
-  if(my_rank == 0)
+  int sync_times = 1;
+  while(!halt_sync)
   {
-    vector<vertex_id_t> degree_range(vocab_size);
-    degree_range[0] = 0;
-    vertex_id_t n = 1;
-    for(vertex_id_t vi = 1; vi < vocab_size;vi++){
-      if(vocab[vi].cn != vocab[vi-1].cn){
-        degree_range[n] = vi;
-        n++;
-      }
-    }
-    degree_range[n]  = vocab_size;
-    random_device rd;
-    mt19937 gen(rd());
-    for(vertex_id_t v = 1; v <= n; v++)
+    unique_lock<std::mutex> lock(sync_mtx);
+    //wait_until syncTime.
+    sync_cv.wait_until(lock,syncTime);
+    //block the training thread; 
+    if(halt_sync == true) break;
+    trainBlocked = true;
+
+    // copyFrom GPU, MPI, write back to GPU 
+    //  No.1 pick up the sync id;
+    int sync_node_num;
+    vector<vertex_id_t> sync_vocab_id_array; // vocab id is not node id. It's the idx in the vpcab
+    if(my_rank == 0)
     {
-      cout << degree_range[v] << " ";
-      uniform_int_distribution<>dis(degree_range[v-1],degree_range[v]-1); 
-      sync_vocab_id_array.push_back(dis(gen));
+      vector<vertex_id_t> degree_range(vocab_size);
+      degree_range[0] = 0;
+      vertex_id_t n = 1;
+      for(vertex_id_t vi = 1; vi < vocab_size;vi++){
+        if(vocab[vi].cn != vocab[vi-1].cn){
+          degree_range[n] = vi;
+          n++;
+        }
+      }
+      degree_range[n]  = vocab_size;
+      random_device rd;
+      mt19937 gen(rd());
+      for(vertex_id_t v = 1; v <= n; v++)
+      {
+        uniform_int_distribution<>dis(degree_range[v-1],degree_range[v]-1); 
+        sync_vocab_id_array.push_back(dis(gen));
+      }
+      sync_node_num = sync_vocab_id_array.size();
     }
-    sync_node_num = sync_vocab_id_array.size();
+    // broadcast sync id amount
+    MPI_Bcast(&sync_node_num,1,get_mpi_data_type<int>(),0,MPI_EMB_COMM);
+    if(my_rank != 0)
+    {
+      sync_vocab_id_array.resize(sync_node_num);
+    }
+    MPI_Bcast(sync_vocab_id_array.data(), sync_node_num, get_mpi_data_type<int>(), 0, MPI_EMB_COMM);
+    // printf("[ %d ] sync_vocab_id_array size: %ld\n",my_rank,sync_vocab_id_array.size());
+    // embedding buffer
+    float *h_sync_emb_buffer = (float*)malloc(sync_node_num * layer1_size *sizeof(float));
+    if(h_sync_emb_buffer == NULL){
+      printf("[ %d ] ERROR. malloc h_sync_emb_buffer fail\n",my_rank);
+    }
+    // load specific embedding from GPU 
+    for(vertex_id_t i =0; i < sync_vocab_id_array.size();i++){
+      checkCUDAerr(cudaMemcpy(h_sync_emb_buffer+i *layer1_size,
+            d_syn0 + sync_vocab_id_array[i]*layer1_size,
+            layer1_size * sizeof(float), cudaMemcpyDeviceToHost));
+    }
+    checkCUDAerr(cudaDeviceSynchronize());
+    // synchronize
+    MPI_Allreduce(MPI_IN_PLACE, h_sync_emb_buffer,sync_node_num * layer1_size , MPI_FLOAT, MPI_SUM, MPI_EMB_COMM);
+    for(vertex_id_t i = 0; i < sync_node_num * layer1_size; i++){
+      h_sync_emb_buffer[i] /= num_procs;
+    }
+    // write back to the GPU 
+    for(vertex_id_t i =0; i < sync_vocab_id_array.size();i++){
+      checkCUDAerr(cudaMemcpy( d_syn0 +sync_vocab_id_array[i]*layer1_size,
+            h_sync_emb_buffer+i *layer1_size,
+            layer1_size * sizeof(float), cudaMemcpyHostToDevice));
+    }
+    checkCUDAerr(cudaDeviceSynchronize());
+    syncTime = chrono::steady_clock::now() + chrono::milliseconds(100); // next sync time.
+    trainBlocked = false; // unblock the traing thread.
+    sync_cv.notify_one(); // wake trainer
+    printf("[ %d ] Syncing Times No.%d\n",my_rank,sync_times++);
   }
-  MPI_Bcast(&sync_node_num,1,get_mpi_data_type<int>(),0,MPI_EMB_COMM);
-  if(my_rank != 0)
-  {
-    sync_vocab_id_array.resize(sync_node_num);
-  }
-  MPI_Bcast(sync_vocab_id_array.data(), sync_node_num, get_mpi_data_type<int>(), 0, MPI_EMB_COMM);
-  // TODO: copy from GPU 
-  // TODO: MPI_Allreduce xxx
-  printf("[ %d ] sync_vocab_id_array size: %ld\n",my_rank,sync_vocab_id_array.size());
-  float *h_sync_emb_buffer = (float*)malloc(sync_node_num * layer1_size *sizeof(float));
-  if(h_sync_emb_buffer == NULL){
-    printf("[ %d ] ERROR. malloc h_sync_emb_buffer fail\n",my_rank);
-  }
-  for(vertex_id_t i =0; i < sync_vocab_id_array.size();i++){
-    checkCUDAerr(cudaMemcpy(h_sync_emb_buffer+i *layer1_size,
-          d_syn0 + sync_vocab_id_array[i]*layer1_size,
-          layer1_size * sizeof(float), cudaMemcpyDeviceToHost));
-  }
-  checkCUDAerr(cudaDeviceSynchronize());
-  MPI_Allreduce(MPI_IN_PLACE, h_sync_emb_buffer,sync_node_num * layer1_size , MPI_FLOAT, MPI_SUM, MPI_EMB_COMM);
-  for(vertex_id_t i = 0; i < sync_node_num * layer1_size; i++){
-    h_sync_emb_buffer[i] /= num_procs;
-  }
-  for(vertex_id_t i =0; i < sync_vocab_id_array.size();i++){
-    checkCUDAerr(cudaMemcpy( d_syn0 +sync_vocab_id_array[i]*layer1_size,
-          h_sync_emb_buffer+i *layer1_size,
-          layer1_size * sizeof(float), cudaMemcpyHostToDevice));
-  }
-  checkCUDAerr(cudaDeviceSynchronize());
-  printf("[ %d ] copy ok\n",my_rank);
-  return;
-  // while(!halt_sync)
-  // {
-  //   cout << " get in the while\n";
-  //   // unique_lock<std::mutex> lock(sync_mtx);
-  //   // wait_until syncTime.
-  //   // sync_cv.wait_until(lock,syncTime);
-  //   // block the training thread;
-  //   trainBlocked = true;
-  //   // TODO: Synchronize the Embedding (sync0) in GPU;
-  //   // copyFrom GPU, MPI, write back to GPU 
-  //   // TODO: pick up the sync id;
-  //
-  //
-  //   printf("syncing %d \n",sync_time++);
-  //   syncTime = chrono::steady_clock::now() + chrono::milliseconds(100);
-  //   trainBlocked = false; // unblock the traing thread.
-  //   sync_cv.notify_one();
-  // }
 }
 
 LR *lr_scheduler;
@@ -1335,15 +1333,20 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
 
   int nu = 1;
 
-  sync_embedding_func();
-  printf("[ %d ] sync_emb_func after\n",my_rank);
-  // while(nu++ <=1){
-  //   char fc[100];
-  //   sprintf(fc,"./out/wiki-0-%d.txt",nu);
-  //   alpha = lr_scheduler->get_lr();
-  //   TrainModelThread(fc);
-  //   std::cout << std::endl;
-  // }
+  thread sync_thread_test(sync_embedding_func);
+  while(nu++ <=1){
+    char fc[100];
+    sprintf(fc,"./out/ytb-0-%d.txt",nu);
+    alpha = lr_scheduler->get_lr();
+    TrainModelThread(fc);
+    std::cout << std::endl;
+  }
+  MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
+  halt_sync = true;
+  sync_cv.notify_all();
+  printf("[ %d ] Waiting Syncing Thread\n",my_rank);
+  sync_thread_test.join();
+  printf("[ %d ] Syncing Thread Halt\n",my_rank);
   return ;
 
   FILE* f_nei_cos_sim = fopen("neighbour_average_cos_sim.txt","w");
@@ -1368,6 +1371,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
     hasResource = false;
     cv.notify_one();
   }
+  //MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
   halt_sync = true;
   sync_thread.join();
   return;

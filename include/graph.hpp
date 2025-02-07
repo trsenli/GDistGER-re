@@ -1,6 +1,7 @@
  
 #pragma once
 
+#include <cstdio>
 #include <string>
 #include <vector>
 #include <iostream>
@@ -509,34 +510,36 @@ public:
     void build_all_edge_container_single(Edge<edge_data_t> *edges, edge_id_t edge_num, EdgeContainer<edge_data_t> *ec, vertex_id_t* vertex_out_degree)
     {
 
-        ec->adj_lists = new AdjList<edge_data_t>[v_num];
+      ec->adj_lists = new AdjList<edge_data_t>[v_num];
+      ec->adj_units = new AdjUnit<edge_data_t>[edge_num];
+      if(ec->adj_units == nullptr){
+        printf("[ ERROR __FILE__:__LINE__ ] adj_units memory alloc fail\n");
+      }
+      edge_id_t chunk_edge_idx = 0;
+      for (vertex_id_t v_i = 0; v_i < this->v_num;v_i++)
+      {
+          ec->adj_lists[v_i].begin = ec->adj_units + chunk_edge_idx;
+          ec->adj_lists[v_i].end = ec->adj_lists[v_i].begin;
 
-        ec->adj_units = new AdjUnit<edge_data_t>[edge_num];
-        edge_id_t chunk_edge_idx = 0;
-        for (vertex_id_t v_i = 0; v_i < this->v_num;v_i++)
-        {
-            ec->adj_lists[v_i].begin = ec->adj_units + chunk_edge_idx;
-            ec->adj_lists[v_i].end = ec->adj_lists[v_i].begin;
+          chunk_edge_idx += vertex_out_degree[v_i];
+      }
 
-            chunk_edge_idx += vertex_out_degree[v_i];
-        }
-
-        for (edge_id_t e_i = 0; e_i < edge_num; e_i++)
-        {
-            auto e = edges[e_i];
-            auto ep = ec->adj_lists[e.src].end ++;
-           
-            ep->neighbour = e.dst;
-            
-            if (!std::is_same<edge_data_t, EmptyData>::value)
-            {
-                ep->data = e.data;
-                // std::cout << e.data << endl;
-            }else{
-                std::cout << " no common neighbor " << std::endl;
-                exit(0);
-            }
-        }
+      for (edge_id_t e_i = 0; e_i < edge_num; e_i++)
+      {
+          auto e = edges[e_i];
+          auto ep = ec->adj_lists[e.src].end ++;
+          
+          ep->neighbour = e.dst;
+          
+          if (!std::is_same<edge_data_t, EmptyData>::value)
+          {
+              ep->data = e.data;
+              // std::cout << e.data << endl;
+          }else{
+              std::cout << " no common neighbor " << std::endl;
+              exit(0);
+          }
+      }
     }
 
     void build_edge_container(Edge<edge_data_t> *edges, edge_id_t local_edge_num, EdgeContainer<edge_data_t> *ec, vertex_id_t* vertex_out_degree)
@@ -690,7 +693,7 @@ public:
         if (graph_format == GF_Binary)
         {
             read_graph(graph_path, local_partition_id, partition_num, read_edges, read_e_num);
-            //g_read_graph(graph_path,  g_read_edges, g_read_e_num);
+            g_read_graph(graph_path,  g_read_edges, g_read_e_num);
             printf("read edge=========ok\n");
         } else if (graph_format == GF_Edgelist)
         {
@@ -716,6 +719,21 @@ public:
             delete []read_edges;
             read_edges = undirected_edges;
             read_e_num *= 2;
+
+            // For g_read_graph
+            Edge<edge_data_t> *g_undirected_edges = new Edge<edge_data_t>[g_read_e_num * 2];
+#pragma omp parallel for
+            for (edge_id_t e_i = 0; e_i < g_read_e_num; e_i++)
+            {
+
+                g_undirected_edges[e_i * 2] = g_read_edges[e_i];
+
+                std::swap(g_read_edges[e_i].src, g_read_edges[e_i].dst);
+                g_undirected_edges[e_i * 2 + 1] = g_read_edges[e_i];
+            }
+            delete []g_read_edges;
+            g_read_edges = g_undirected_edges;
+            g_read_e_num *= 2;
         }
 
         this->vertex_out_degree = alloc_vertex_array<vertex_id_t>();
@@ -828,12 +846,12 @@ public:
 
         Edge<edge_data_t> *local_edges = new Edge<edge_data_t>[local_e_num];
 
-        // shuffle_edges(read_edges, read_e_num, local_edges, local_e_num);
+        shuffle_edges(read_edges, read_e_num, local_edges, local_e_num);
 
         this -> csr = new EdgeContainer<edge_data_t>();
 
         // build_edge_container(local_edges, local_e_num, this->csr, vertex_out_degree); // load partial edges
-        build_all_edge_container_single(read_edges, read_e_num , this->csr,vertex_out_degree);
+        build_all_edge_container_single(g_read_edges, g_read_e_num , this->csr,vertex_out_degree);
         printf("[ %d ] All edges CSR build success\n",local_partition_id);
         // printEdgeContainer(this->csr->adj_lists);
 
