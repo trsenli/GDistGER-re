@@ -34,6 +34,9 @@ using std::endl;
 #define MAX_SENTENCE_LENGTH 1000
 #define MAX_CODE_LENGTH 40
 
+#define EVALUATION_NEIGHBOUR_NUM 30
+#define NODE_TRAINING_CONVERGE_THRESHOLD 0.6
+
 #define MAX_SENTENCE 15000
 #define checkCUDAerr(err) {\
   cudaError_t cet = err;\
@@ -1258,9 +1261,19 @@ float cos_sim(float* v1,float* v2, int dim){
 float node_neighbour_average_cos_sim(vertex_id_t v_id,myEdgeContainer*csr){
   float sum_cos_sim = 0.0f;
   int nei_n = csr->adj_lists[v_id].end - csr->adj_lists[v_id].begin;
-  // 1. get neighbour set;
+  //  Get neighbour set; If neighbour amout > 30,then chose thiry randomly
+  vector<vertex_id_t> neighbor_set;
   for(auto it = csr->adj_lists[v_id].begin; it < csr->adj_lists[v_id].end; it++){
-    vertex_id_t nei = it->neighbour;
+    neighbor_set.push_back(it->neighbour);
+  }
+  if(neighbor_set.size() > EVALUATION_NEIGHBOUR_NUM){
+    std::random_device rd;
+    std::mt19937 g(rd());
+    shuffle(neighbor_set.begin(), neighbor_set.end(), g);
+  }
+  int end = neighbor_set.size() > EVALUATION_NEIGHBOUR_NUM ? EVALUATION_NEIGHBOUR_NUM : neighbor_set.size();
+  for(int i =0; i < end; i++){
+    vertex_id_t nei = neighbor_set[i];
     vertex_id_t v_1 = id2offset[v_id];
     vertex_id_t v_2 = id2offset[nei];
     float sim = cos_sim(syn0+v_1 * layer1_size, syn0+v_2*layer1_size,layer1_size);
@@ -1340,6 +1353,12 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
     alpha = lr_scheduler->get_lr();
     TrainModelThread(fc);
     std::cout << std::endl;
+    for(vertex_id_t v = 0;v < vocab_size; v++){
+      if(flag[v]== true){
+        float s = node_neighbour_average_cos_sim(v,csr);
+        if(s > NODE_TRAINING_CONVERGE_THRESHOLD) flag[v] = false;
+      }
+    }
   }
   MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
   halt_sync = true;
