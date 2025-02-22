@@ -1,3 +1,4 @@
+#include <climits>
 #include <condition_variable>
 #include <cstdio>
 #include <mutex>
@@ -1058,7 +1059,7 @@ void sync_embedding_func()
     syncTime = chrono::steady_clock::now() + chrono::milliseconds(100); // next sync time.
     trainBlocked = false; // unblock the traing thread.
     sync_cv.notify_one(); // wake trainer
-    printf("[ %d ] Syncing Times No.%d\n",my_rank,sync_times++);
+    // printf("[ %d ] Syncing Times No.%d\n",my_rank,sync_times++);
   }
 }
 
@@ -1104,8 +1105,8 @@ void TrainModelThread(string data_path)
       last_word_count = word_count;
       if ((debug_mode > 1)) {
         now = clock();
-        printf("%cAlpha: %f  Progress: %.2f%%  Words/sec: %.2fk  ", 13, alpha,
-            word_count_actual / (float)(iter * train_words + 1) * 100,
+        printf("%cAlpha: %f  Words/sec: %.2fk  ", 13, alpha,
+            // word_count_actual / (float)(iter * train_words + 1) * 100,
             word_count_actual / ((float)(now - start + 1) / (float)CLOCKS_PER_SEC * 1000));
         fflush(stdout);
       }
@@ -1440,22 +1441,31 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   checkCUDAerr(cudaMalloc(&d_B, EVALUATION_NEIGHBOUR_NUM * layer1_size *sizeof(float)));
   checkCUDAerr(cudaMalloc(&d_results, EVALUATION_NEIGHBOUR_NUM * sizeof(float)));
 
-  thread sync_thread_test(sync_embedding_func);
-  int last_eva_num = 0;
-  while(nu++ <=30){
-    char fc[100];
-    sprintf(fc,"./out/ytb-0-%d.txt",nu);
+  thread sync_thread(sync_embedding_func);
+  vertex_id_t last_eva_num = UINT_MAX;
+  int train_iter = 0;
+  bool stop_train_flag = false;
+  while(!stop_train_flag){
+    // 等待游走产生训练资料
+    unique_lock<mutex> lock(mtx);
+    cv.wait(lock,[]{return hasResource;});
+    string task_str = taskq.pop();
+    // 此时可以sample下一轮了
+    hasResource = false; // 坑位被释放
+    cv.notify_one();
+    cout << "====== POP " << task_str <<" ===" << endl;
+    train_iter++;
     alpha = lr_scheduler->get_lr();
     pause_sync = false;
-    TrainModelThread(fc);
+    MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
+    TrainModelThread(task_str);
     MPI_Barrier(MPI_EMB_COMM);
     pause_sync = true;
     std::cout << std::endl;
     Timer eva_timer;
-    int eva_num = 0;
+    vertex_id_t eva_num = 0;
     for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
       if(vertex_walker_stop_flag[v]== 0 ){
-        // TODO: distribute execute
         float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
         eva_num ++ ;
         if(s > NODE_TRAINING_CONVERGE_THRESHOLD){
@@ -1464,99 +1474,29 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
       }
     }
     MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EMB_COMM);
+    MPI_Allreduce(MPI_IN_PLACE, &eva_num, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM , MPI_EMB_COMM);
     // 收敛了，每次减少的比例不多
-    if( last_eva_num != 0 && ((float)eva_num / last_eva_num) > EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO ){
-      halt_sync = true;
-      break;
+    float eva_num_ratio = (float)eva_num / last_eva_num;
+    if( last_eva_num != 0 && eva_num_ratio> EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO ){
+      halt_sync = true; // 停止同步
+      stop_sampling_flag = true; // 停止采样
+      stop_train_flag = true;    // 停止训练
     }
-    printf("[ %d ]Iter %d Evaluate Num: %d Evaluate time: %f s\n",my_rank,nu,eva_num,eva_timer.duration());
+    printf("[ %d ]Iter %d Evaluate Num: %d Ratio: %f Time: %f s\n",my_rank,train_iter,eva_num,eva_num_ratio,eva_timer.duration());
     last_eva_num = eva_num;
   }
   MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
   halt_sync = true;
   sync_cv.notify_all();
   printf("[ %d ] Waiting Syncing Thread\n",my_rank);
-  sync_thread_test.join();
+  sync_thread.join();
+  MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
   printf("[ %d ] Syncing Thread Halt\n",my_rank);
+
   cudaFree(d_A);
   cudaFree(d_B);
   cudaFree(d_results);
-  return ;
 
-
-
-  FILE* f_nei_cos_sim = fopen("neighbour_average_cos_sim.txt","w");
-  vector<vector<float>>node_neighbour_average_cos_sim_array(vocab_size);
-  int n2 = 2;
-  float threshold = 0.6;
-  thread sync_thread(sync_embedding_func);
-  while(stop_sampling_flag == false){
-    unique_lock<mutex> lock(mtx);
-    cv.wait(lock,[]{return hasResource;});
-    string str = taskq.pop();
-    cout << "====== pop " << str <<" ===" << endl;
-    alpha = lr_scheduler->get_lr();
-    pause_sync = false;
-    TrainModelThread(str);
-    pause_sync = true;
-    std::cout << std::endl;
-    for(vertex_id_t v = 0;v < vocab_size; v++){
-      if(vertex_walker_stop_flag[v]== true){
-        float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
-        if(s > threshold) vertex_walker_stop_flag[v] = false;
-      }
-    }
-    hasResource = false;
-    cv.notify_one();
-  }
-  //MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
-  halt_sync = true;
-  sync_thread.join();
-  return;
-
-  FILE* f_topk = fopen("super_topK.txt","w");
-  int n1 = 2;
-  while(n1++<30){
-    char fc[100];
-    sprintf(fc,"./out/tmp-0-%d.txt",n1);
-    alpha = lr_scheduler->get_lr();
-    TrainModelThread(fc);
-    std::cout << std::endl;
-    float acc = find_supernode_topK_accurancy(0.01,10,csr);
-    cout << "find super node topK acc: " << acc << endl;
-    fprintf(f_topk,"%f\n",acc);
-  }
-  fclose(f_topk);
-  return;
-
-  // [Test]
-  
-  //compute_kl_from_emb(last_emb,syn0, kl,tmpN,layer1_size);
-  //std::cout << std::endl;
-  //checkCUDAerr(cudaDeviceSynchronize()); 
-  //printf("[ %d ] COMPUTE KL From Emb : %.f\n",my_rank,*kl);
-
-  // [End Test]
-
- //  FILE* f_rel_ent = fopen("rel_ent.txt","w");
- //  FILE* f_delta_ent = fopen("delta_ent.txt","w");
- // int n = 2;
- //  while(n++<30){
- //    char fc[100];
- //    sprintf(fc,"./out/tmp-0-%d.txt",n);
- //    TrainModelThread(fc);
- //    cout << endl;
- //    // termination judgment
- //    compute_kl_from_emb(last_emb,syn0, kl,vocab_size * 0.1,layer1_size);
- //    checkCUDAerr(cudaDeviceSynchronize()); 
- //    printf("[ %d ] COMPUTE KL from emb : %.f\n",my_rank,*kl);
- //    fprintf(f_rel_ent,"%s: %f\n",fc,*kl);
- //    memcpy(last_emb,syn0,(long long)vocab_size * layer1_size * sizeof(float));
- //  }
- //  fclose(f_delta_ent);
- //  fclose(f_rel_ent);
- //  printf("=============Task over | Calculate delta H ===========\n");
-  
   
   cudaFree(d_table);
   cudaFree(d_syn1);
@@ -1565,6 +1505,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   cudaFree(d_vocab_point);
   cudaFree(d_vocab_code);
 
+  MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
   if(my_rank != 0) return;
 
   std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();

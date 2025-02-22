@@ -556,8 +556,7 @@ private:
                         continue;
                     }
                     vertex_id_t start_v = walker_init_dist_func(w_i);
-                    // TODO: skip specific vertex 
-                    if(vertex_walker_stop_flag[start_v]==1){
+                    if(start_v <vertex_walker_stop_flag.size() && vertex_walker_stop_flag[start_v]==1){
                       continue;
                     }
                     Walker<walker_data_t> walker;
@@ -619,11 +618,10 @@ public:
     template<typename query_data_t, typename response_data_t, typename transition_config_t>
     void internal_random_walk(WalkerConfig<edge_data_t, walker_data_t> *walker_config, transition_config_t *transition_config, WalkConfig* walk_config, int order)
     {
-        FILE* f_iter_walker_num = fopen("iter_walker_num.txt","w");
         typedef Walker<walker_data_t> walker_t;
         typedef Message<walker_t> walker_msg_t;
 
-        walker_id_t walker_num = walker_config->walker_num * init_round;
+        walker_id_t walker_num = walker_config->walker_num;
         // walker_id_t walker_per_iter = walker_num * walk_config->rate;
         walker_id_t walker_per_iter = walker_num;
         if (walker_per_iter == 0) walker_per_iter = 1;
@@ -670,8 +668,6 @@ public:
 
             walk_data.local_walker_num = init_walkers(walk_data.local_walkers, walk_data.local_walkers_bak, walker_begin, walker_begin + walk_data.active_walker_num, walker_config->walker_init_dist_func, walker_config->walker_init_state_func);
             printf("\n【Round %d  Walker Num: %d】 \n",iter,walk_data.local_walker_num);
-            fprintf(f_iter_walker_num,"%d\n",walk_data.local_walker_num);
-            fflush(f_iter_walker_num);
 
             if (walk_data.collect_path_flag)
             {
@@ -756,9 +752,7 @@ public:
                     //     printf("[ %d ] STOP_SAMPLING_FLAG SET \n",get_mpi_rank());
                     //     terminal_flag = true;
                     // }
-                    // TODO : 动态决定每个图的收敛数量
-                    if(walk_data.local_walker_num < 1000){ // TEST 看看 30 轮的相对熵怎么变化的。
-                        stop_sampling_flag = true;
+                    if(stop_sampling_flag){ 
                         terminal_flag = true;
                         remained_walker = 0;
                     }
@@ -799,7 +793,6 @@ public:
 
         this->dealloc_array(walk_data.local_walkers, walker_array_size);
         this->dealloc_array(walk_data.local_walkers_bak, walker_array_size);
-        fclose(f_iter_walker_num);
     }
 
     void internal_random_walk_wrap (WalkerConfig<edge_data_t, walker_data_t> *walker_config, TransitionConfig<edge_data_t, walker_data_t> *transition_config, WalkConfig *walk_config)

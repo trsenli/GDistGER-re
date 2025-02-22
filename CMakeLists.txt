@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.5)
 
 
 project(DistGER)
-set(CMAKE_BUILD_TYPE "Debug")
+set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_EXPORT_COMPILE_COMMANDS on) # generate compile_commands.json
 
 set(DGER_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -20,7 +20,7 @@ find_package(MPI REQUIRED)
 if(MPI_FOUND)
     set(CMAKE_CXX_COMPILE_FLAGS ${CMAKE_CXX_COMPILE_FLAGS} ${MPI_COMPILE_FLAGS})
     set(CMAKE_CXX_LINK_FLAGS ${CMAKE_CXX_LINK_FLAGS} ${MPI_LINK_FLAGS})
-    set(MPI_EXECUTABLE_SUFFIX .openmpi)
+    #set(MPI_EXECUTABLE_SUFFIX .openmpi)
     include_directories(${MPI_INCLUDE_PATH})
 endif()
 

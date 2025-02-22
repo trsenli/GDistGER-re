@@ -3,8 +3,8 @@
 #include <string>
 #include <vector>
 #include "edge_container.hpp"
-
-// #include "dsgl.hpp"
+#include <sys/stat.h>
+#include <cstdio>
 
 // template struct EdgeContainer<real_t>;
 using namespace std;
@@ -17,6 +17,7 @@ struct Empty
 // ./bin/simple_walk -g ./karate.data -v 34 -w 34 -o ./out/walks.txt > perf_dist.txt
 int main(int argc, char **argv)
 {
+    umask(0);
     Timer timer;
     MPI_Instance mpi_instance(&argc, &argv);
     int my_rank = get_mpi_rank();
@@ -60,10 +61,8 @@ int main(int argc, char **argv)
     }
     cout <<my_rank <<" myec access " << myec-> adj_lists[110].begin->neighbour<<endl; 
     cout << my_rank <<" graph.csr access " << graph.csr-> adj_lists[110].begin->neighbour<<endl; 
-    train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue,my_rank,myec);
-    printf("[ %d ] train_corpus_cuda after\n",my_rank);
-    return 0;
-    // thread train_thread(train_corpus_cuda,argc,argv,std::ref(vertex_degree),std::ref(graph.out_queue), my_rank,myec);
+    // train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue,my_rank,myec);
+    thread train_thread(train_corpus_cuda,argc,argv,std::ref(vertex_degree),std::ref(graph.out_queue), my_rank,myec);
     // * 
 
     auto extension_comp = [&](Walker<uint32_t> &walker, vertex_id_t current_v)
@@ -124,7 +123,7 @@ int main(int argc, char **argv)
     // ================= annotation line ====================
 
     
-    // train_thread.join();
+    train_thread.join();
     printf("> [p%d WHOLE TIME:] %lf \n",get_mpi_rank(), timer.duration());
     // train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue);
     // dsgl(argc, argv,&graph.vertex_cn,&graph.new_sort,&graph);

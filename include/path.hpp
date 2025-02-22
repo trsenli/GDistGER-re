@@ -1,11 +1,11 @@
 
 #pragma once
 
+#include <climits>
 #include <string.h>
 #include <vector>
 #include <mutex>
 #include <thread>
-#include <unordered_map>
 
 #include "type.hpp"
 #include "util.hpp"
@@ -67,7 +67,7 @@ struct PathSet
     void dump(const char* output_path, const char* fopen_mode, bool with_head_info ,std::vector<vertex_id_t> &vec,std::vector<int>&local_corpus,std::vector<int>&vertex_cn,CoOccorCsr* cocsr)
     {
         Timer timer;
-        FILE* f = fopen(output_path, fopen_mode);
+        FILE* f = fopen(output_path,fopen_mode);
         assert(f != NULL);
         
         size_t null_sen = 0;
@@ -75,15 +75,7 @@ struct PathSet
         {
             for (walker_id_t walker_idx = 0; walker_idx < path_num[worker_idx]; walker_idx++)
             {   
-                // std::vector<vertex_id_t>tmp_path;
-                // with_head_info = true;
-                // std::cout << "with_head_info = " << with_head_info << "\n";
 
-                if (with_head_info)
-                {
-
-                    // fprintf(f, "%u %u", walker_id[worker_idx][walker_idx], path_length[worker_idx][walker_idx]);
-                }
                 if(path_length[worker_idx][walker_idx]==0)null_sen++;
                 for (step_t p_i = 0; p_i < path_length[worker_idx][walker_idx]; p_i++)
                 {
@@ -93,21 +85,13 @@ struct PathSet
                     // tmp_path.push_back(*(path_begin[worker_idx][walker_idx] + p_i));
 
                     vertex_cn[*(path_begin[worker_idx][walker_idx] + p_i)]++;
-                    local_corpus.push_back(*(path_begin[worker_idx][walker_idx] + p_i));
+                    // local_corpus.push_back(*(path_begin[worker_idx][walker_idx] + p_i));
                     assert(*(path_begin[worker_idx][walker_idx] + p_i)<=INT_MAX);
 
-                    // if(p_i != path_length[worker_idx][walker_idx]-1){
-                    //     vertex_id_t cur = *(path_begin[worker_idx][walker_idx] + p_i);
-                    //     vertex_id_t next = *(path_begin[worker_idx][walker_idx] + p_i + 1);
-                    //     cocsr->add_co_occor(cur,next);
-                    // }else{
-                    //     vertex_id_t cur = *(path_begin[worker_idx][walker_idx] + p_i);
-                    //      cocsr->add_co_occor(cur,cur);
-                    // }
                 }
                 fprintf(f, "\n");
                 // local_walk_res.push_back(tmp_path);
-                local_corpus.push_back(-1);
+                // local_corpus.push_back(-1);
             }
         }
         fclose(f);
