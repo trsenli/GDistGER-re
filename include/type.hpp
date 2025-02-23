@@ -2,15 +2,16 @@
 #pragma once
 
 #include <stdint.h>
-#include <iostream>
 #include <queue>
 #include <mutex>
 #include <string>
+#include <vector>
 
 using std::queue;
 using std::mutex;
 using std::lock_guard;
 using std::string;
+using std::vector;
 
 typedef uint32_t vertex_id_t;
 typedef uint64_t com_neighbour_t;
@@ -21,6 +22,7 @@ typedef uint32_t walker_id_t;
 typedef uint32_t step_t;
 typedef float real_t;
 typedef uint32_t dist_counter_t;
+using corpus_t = vector<vector<vertex_id_t>>;
 
 struct EmptyData
 {

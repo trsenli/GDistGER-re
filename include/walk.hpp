@@ -406,7 +406,7 @@ class WalkEngine : public GraphEngine<edge_data_t>
 
 public:
     vector<int>vertex_cn;
-    vector<int>local_corpus;
+    corpus_t local_corpus;
     vector<vertex_id_t> new_sort; 
     vertex_id_t minLength = 20;
     vertex_id_t init_round = 5;

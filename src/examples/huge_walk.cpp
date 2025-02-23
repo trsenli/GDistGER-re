@@ -1,10 +1,16 @@
+#include "type.hpp"
 #include "walk.hpp"
 #include "option_helper.hpp"
+#include <cstddef>
 #include <string>
+#include <utility>
 #include <vector>
 #include "edge_container.hpp"
 #include <sys/stat.h>
 #include <cstdio>
+#include "compress.hpp"
+#include <map>
+
 
 // template struct EdgeContainer<real_t>;
 using namespace std;
@@ -122,7 +128,50 @@ int main(int argc, char **argv)
 
     // ================= annotation line ====================
 
-    
+   // Test for bitmap
+    compress_t compress_corpus;
+    CorpusCompressor compressor;
+    compressor.compressCorpus(graph.local_corpus, compress_corpus);
+
+    size_t origin_size = 0;
+    for(size_t i = 0; i < graph.local_corpus.size();i++){
+        origin_size += graph.local_corpus[i].size();
+    }
+    origin_size *= sizeof(vertex_id_t);
+
+    // cout << "original size: " << origin_size << " Byte." << endl;
+    size_t compress_size = 0;
+    for(size_t i = 0; i < compress_corpus.size();i++){
+        compress_size += compress_corpus[i].coreMap.mem_size();
+        compress_size += compress_corpus[i].misc_data.size() * sizeof(vertex_id_t);
+    }
+    cout <<"compress size: " << compress_size << " Byte." << endl;
+    cout <<"Ratio: " << (float)compress_size/origin_size << endl;
+
+    origin_size = 0;
+    compress_size =0;
+    for(size_t i = 0; i < graph.local_corpus.size();i++) {
+        origin_size += graph.local_corpus[i].size();
+        compress_size += graph.local_corpus[i].size();
+        map<vertex_id_t,int> freq;
+        for(size_t j = 1; j < graph.local_corpus[i].size();j++){
+            freq[graph.local_corpus[i][j]]++;
+        }
+        int max_freq = 0;
+        vector<pair<vertex_id_t,int>> core_array;
+        for(auto& pair: freq){
+            core_array.push_back(pair);
+        }
+        sort(core_array.begin(),core_array.end(),[](pair<vertex_id_t, int>&p1,pair<vertex_id_t,int>&p2){
+            return p1.second > p2.second;
+        });
+        if(core_array.size()>0) compress_size -= core_array[0].second;
+        if(core_array.size()>1) compress_size -= core_array[1].second;
+    }
+    cout << "Original size: " << origin_size * 4 << " Byte." << endl;
+    cout <<"Theory compress size: " << compress_size * 4 << " Byte." << endl;
+    cout <<"Ratio: " << (float)compress_size/origin_size << endl;
+
     train_thread.join();
     printf("> [p%d WHOLE TIME:] %lf \n",get_mpi_rank(), timer.duration());
     // train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue);

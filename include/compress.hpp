@@ -2,10 +2,10 @@
 #include "type.hpp"
 #include <cstddef>
 #include <iostream>
+#include <map>
 #include <vector>
 
 using namespace std;
-using corpus_t = vector<vector<vertex_id_t>>;
 class Bitmap {
 private:
     size_t bitSize = 0;
@@ -65,6 +65,10 @@ public:
         return this-> bitSize;
     }
 
+    size_t mem_size(){
+        return data.size();
+    }
+
     void printData(){
         for(size_t i = 0; i < data.size() * 8; i++){
             cout<< check(i);
@@ -73,22 +77,33 @@ public:
     }
 };
 
-class HeadMapSequence {
+class CoreCompressedSequence {
 public:
-    Bitmap headmap;
+    Bitmap coreMap;
     vector<vertex_id_t> misc_data;
 };
 
-using compress_t = vector<HeadMapSequence>; 
+using compress_t = vector<CoreCompressedSequence>; 
 
 class CorpusCompressor {
 public:
-    void compressSequence(vector<vertex_id_t> &seq,HeadMapSequence& hms) {
-        vertex_id_t headNode = seq[0];
-        hms.misc_data.push_back(headNode);
-        for(size_t  i = 1; i < seq.size(); i++) {
-            if(seq[i] == headNode){
-                hms.headmap.set(i);
+    void compressSequence(vector<vertex_id_t> &seq,CoreCompressedSequence& hms) {
+        map<vertex_id_t,int> freq;
+        for(size_t i = 0; i < seq.size(); i++){
+            freq[seq[i]]++;
+        }
+        vertex_id_t freq_max_node;
+        int max_freq = 0;
+        for(const auto& pair: freq){
+            if(pair.second > max_freq){
+                freq_max_node = pair.first;
+                max_freq = pair.second;
+            } 
+        }
+        hms.misc_data.push_back(freq_max_node);
+        for(size_t  i = 0; i < seq.size(); i++) {
+            if(seq[i] == freq_max_node){
+                hms.coreMap.set(i);
                 continue;
             }else{
                 hms.misc_data.push_back(seq[i]);
@@ -96,13 +111,13 @@ public:
         }
     }
 
-    void uncompressSequence(vector<vertex_id_t> &seq,HeadMapSequence& hms) {
-        vertex_id_t headNode = hms.misc_data[0];
-        int p = 0;// p misc_data point
+    void uncompressSequence(vector<vertex_id_t> &seq,CoreCompressedSequence& hms) {
+        vertex_id_t freq_max_node = hms.misc_data[0];
+        int p = 1;// p misc_data point; the first one is Freq_Peak
         int q = 0; // map point
-        while(q < hms.headmap.size()){
-            if(hms.headmap.check(q)){
-                seq.push_back(headNode);
+        while(q < hms.coreMap.size()){
+            if(hms.coreMap.check(q)){
+                seq.push_back(freq_max_node);
             }else {
                 seq.push_back(hms.misc_data[p]);
                 p++;
@@ -117,7 +132,7 @@ public:
 
     void compressCorpus(corpus_t &cor, compress_t &cp) {
         for(size_t i = 0; i < cor.size(); i++){
-            HeadMapSequence hms;
+            CoreCompressedSequence hms;
             compressSequence(cor[i], hms);
             cp.push_back(hms);
         }

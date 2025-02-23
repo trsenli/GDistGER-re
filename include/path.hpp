@@ -64,7 +64,7 @@ struct PathSet
             delete []path_num;
         }
     }
-    void dump(const char* output_path, const char* fopen_mode, bool with_head_info ,std::vector<vertex_id_t> &vec,std::vector<int>&local_corpus,std::vector<int>&vertex_cn,CoOccorCsr* cocsr)
+    void dump(const char* output_path, const char* fopen_mode, bool with_head_info ,std::vector<vertex_id_t> &vec,corpus_t &local_corpus,std::vector<int>&vertex_cn,CoOccorCsr* cocsr)
     {
         Timer timer;
         FILE* f = fopen(output_path,fopen_mode);
@@ -75,7 +75,7 @@ struct PathSet
         {
             for (walker_id_t walker_idx = 0; walker_idx < path_num[worker_idx]; walker_idx++)
             {   
-
+                vector<vertex_id_t> seq;
                 if(path_length[worker_idx][walker_idx]==0)null_sen++;
                 for (step_t p_i = 0; p_i < path_length[worker_idx][walker_idx]; p_i++)
                 {
@@ -85,13 +85,14 @@ struct PathSet
                     // tmp_path.push_back(*(path_begin[worker_idx][walker_idx] + p_i));
 
                     vertex_cn[*(path_begin[worker_idx][walker_idx] + p_i)]++;
-                    // local_corpus.push_back(*(path_begin[worker_idx][walker_idx] + p_i));
+                    seq.push_back(*(path_begin[worker_idx][walker_idx] + p_i));
                     assert(*(path_begin[worker_idx][walker_idx] + p_i)<=INT_MAX);
 
                 }
-                fprintf(f, "\n");
-                // local_walk_res.push_back(tmp_path);
-                // local_corpus.push_back(-1);
+                if(path_length[worker_idx][walker_idx]!=0){
+                    fprintf(f, "\n");
+                    local_corpus.push_back(seq);
+                }
             }
         }
         fclose(f);
