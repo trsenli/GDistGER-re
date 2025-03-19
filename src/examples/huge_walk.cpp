@@ -25,6 +25,7 @@ int main(int argc, char **argv)
 {
     umask(0);
     Timer timer;
+    double load_graph_time = 0.0;
     MPI_Instance mpi_instance(&argc, &argv);
     int my_rank = get_mpi_rank();
 
@@ -40,7 +41,9 @@ int main(int argc, char **argv)
     graph.set_minLength(opt.min_length);
     printf("init_round = %d, min_length = %d\n", graph.init_round, graph.minLength);
     printf("graph path: %s\n",opt.graph_path.c_str());
+    Timer load_timer;
     graph.load_graph(opt.v_num, opt.graph_path.c_str(), opt.partition_path.c_str(), opt.make_undirected);
+    load_graph_time = load_timer.duration();
     printf("load_graph ok!\n");
     graph.vertex_cn.resize(graph.get_vertex_num());
     // graph.load_commonNeighbors(opt.graph_common_neighbour.c_str());
@@ -174,6 +177,8 @@ int main(int argc, char **argv)
 
     train_thread.join();
     printf("> [p%d WHOLE TIME:] %lf \n",get_mpi_rank(), timer.duration());
+    printf("msgTime： %lf \n",graph.msg_time);
+    printf("load graph time： %lf \n",load_graph_time);
     // train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue);
     // dsgl(argc, argv,&graph.vertex_cn,&graph.new_sort,&graph);
     return 0;

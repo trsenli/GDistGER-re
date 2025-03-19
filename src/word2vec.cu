@@ -1,5 +1,6 @@
 #include <climits>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdio>
 #include <mutex>
 #include <random>
@@ -977,8 +978,26 @@ void sgKernel(int *d_sen, int *d_sent_len, int *d_negSample, float alpha, int cn
 }
 volatile bool halt_sync = false;
 volatile bool pause_sync = false;
+void all_sync(){
+      checkCUDAerr(cudaMemcpy(syn0,
+            d_syn0 ,
+            (size_t)vocab_size * layer1_size * sizeof(float), cudaMemcpyDeviceToHost));
+    checkCUDAerr(cudaDeviceSynchronize());
+    MPI_Allreduce(MPI_IN_PLACE, syn0,
+            (size_t)vocab_size* layer1_size , MPI_FLOAT, MPI_SUM, MPI_EMB_COMM);
+    for(size_t i = 0; i < (size_t) vocab_size * layer1_size;i++){
+        syn0[i] /= num_procs;
+    }
+      checkCUDAerr(cudaMemcpy(d_syn0,
+            syn0 ,
+            (size_t)vocab_size * layer1_size * sizeof(float), cudaMemcpyHostToDevice));
+    checkCUDAerr(cudaDeviceSynchronize());
+
+}
+double sync_spend_time = 0.0f;
 void sync_embedding_func()
 {
+    Timer sync_timer;
   chrono::steady_clock::time_point syncTime = chrono::steady_clock::now() + chrono::milliseconds(100);
   int sync_times = 1;
   while(!halt_sync)
@@ -999,6 +1018,10 @@ void sync_embedding_func()
     //block the training thread; 
     trainBlocked = true;
 
+    sync_timer.restart();
+    all_sync();
+    sync_spend_time += sync_timer.duration();
+    
     // copyFrom GPU, MPI, write back to GPU 
     //  No.1 pick up the sync id;
     int sync_node_num;
@@ -1399,6 +1422,8 @@ float find_supernode_topK_accurancy(float p,int k,myEdgeContainer*csr){
   }
   return top_sum/ (float)(k * vocab_size *p);
 }
+double train_spend_time = 0.0;
+double evaluate_spend_time = 0.0;
 void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   printf("==========================Train Model In=====================\n");
   long a, b, c, d;
@@ -1410,7 +1435,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   // for(size_t i = 0; i < vocab_size * 0.10;i++){
   //   printf("id: %s, degree: %ld\n",vocab[i].word,vocab[i].cn);
   // }
-
+   Timer train_timer;
   vector<float> H;
   float delta_H;
   
@@ -1446,6 +1471,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   int train_iter = 0;
   bool stop_train_flag = false;
   while(!stop_train_flag){
+      train_timer.restart();
     // 等待游走产生训练资料
     unique_lock<mutex> lock(mtx);
     cv.wait(lock,[]{return hasResource;});
@@ -1462,6 +1488,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
     MPI_Barrier(MPI_EMB_COMM);
     pause_sync = true;
     std::cout << std::endl;
+    train_spend_time += train_timer.duration();
     Timer eva_timer;
     vertex_id_t eva_num = 0;
     for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
@@ -1482,6 +1509,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
       stop_sampling_flag = true; // 停止采样
       stop_train_flag = true;    // 停止训练
     }
+    evaluate_spend_time += eva_timer.duration();
     printf("[ %d ]Iter %d Evaluate Num: %d Ratio: %f Time: %f s\n",my_rank,train_iter,eva_num,eva_num_ratio,eva_timer.duration());
     last_eva_num = eva_num;
   }
@@ -1493,6 +1521,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
   printf("[ %d ] Syncing Thread Halt\n",my_rank);
 
+  printf("[%d] Train: %f Sync: %f EVA: %f \n",my_rank,train_spend_time,sync_spend_time,evaluate_spend_time);
   cudaFree(d_A);
   cudaFree(d_B);
   cudaFree(d_results);
@@ -1749,7 +1778,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
 
   TrainModel(corpus_q,csr);
 
-  printf("[ %d ] TrainModel after\n",my_rank);
+    printf("[ %d ] [Sync Time Spend: %f s]\n",my_rank,sync_spend_time);
   // memory free
   free(vocab_codelen);
   free(vocab_point);
@@ -1763,7 +1792,6 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   free(expTable);
   cudaFree(d_expTable);
   free(last_emb);
-  printf("[ %d ] free after\n",my_rank);
   
 
   return 0;

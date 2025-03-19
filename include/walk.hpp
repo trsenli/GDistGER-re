@@ -454,6 +454,7 @@ public:
 
 public:
     double other_time = 0.0;
+    double msg_time = 0.0;
     partition_id_t get_local_partition_id()
     {
         return this->local_partition_id;
@@ -1047,12 +1048,14 @@ public:
                 local_walker_num = end - begin;
                 std::swap(local_walkers, local_walkers_bak);
             };
+            Timer msg_timer;
             active_walker_num = this->template distributed_execute<walker_t>(
                 msg_producer,
                 msg_consumer,
                 local_walkers_bak,
                 active_walker_num >= PHASED_EXECTION_THRESHOLD * this->partition_num
             );
+            this->msg_time += msg_timer.duration();
         }
     }
 };
