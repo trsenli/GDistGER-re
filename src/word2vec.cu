@@ -38,8 +38,8 @@ using std::endl;
 #define MAX_CODE_LENGTH 40
 
 #define EVALUATION_NEIGHBOUR_NUM 30
-#define NODE_TRAINING_CONVERGE_THRESHOLD 0.6
-#define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.8
+#define NODE_TRAINING_CONVERGE_THRESHOLD 0.4
+#define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.7
 
 #define MAX_SENTENCE 15000
 #define checkCUDAerr(err) {\
@@ -55,10 +55,11 @@ std::mutex mtx;
 std::condition_variable cv;
 bool hasResource = false;
 extern volatile bool stop_sampling_flag;
-const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
+const long long vocab_hash_size = 900000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
                                   
 
 MPI_Comm MPI_EMB_COMM;
+MPI_Comm MPI_EVA_COMM;
 int num_procs = 1;
 int my_rank = 0;
 
@@ -79,7 +80,7 @@ char train_file[MAX_STRING], output_file[MAX_STRING];
 char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];
 struct vocab_word *vocab;
 int binary = 0, cbow = 1, debug_mode = 2, window = 5, min_count = 5, min_reduce = 1, reuseNeg = 1;
-int *vocab_hash;
+long long *vocab_hash;
 long long vocab_max_size = 1000, vocab_size = 0, layer1_size = 100;
 long long train_words = 0, word_count_actual = 0, iter = 5, file_size = 0, classes = 0;
 float alpha = 0.025, starting_alpha, sample = 1e-3;
@@ -652,8 +653,8 @@ int VocabCompare(const void *a, const void *b) {
 
 // Sorts the vocabulary by frequency using word counts
 void SortVocab() {
-  int a, size;
-  unsigned int hash;
+  unsigned long long a, size;
+  unsigned long long hash;
   // Sort the vocabulary and keep </s> at the first position
   qsort(&vocab[0], vocab_size, sizeof(struct vocab_word), VocabCompare);
   for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
@@ -810,7 +811,9 @@ void SaveVocab() {
   for (i = 0; i < vocab_size; i++) fprintf(fo, "%s %lld\n", vocab[i].word, vocab[i].cn);
   fclose(fo);
 }
+
 vector<vertex_id_t> id2offset;
+
 void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
   vertex_id_t v_num = degrees.size();
   long long a, i = 0;
@@ -819,11 +822,14 @@ void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
   vocab_size = 0;
   for (vertex_id_t v = 0; v < v_num; v++)
   {
+    //printf("\r[ %d ] add v: %u to vocab",my_rank,v);
     std::sprintf(word,"%u",v);  // node ID 以字符串的形式存在 vocab 里面。
     a = AddWordToVocab(word);
     vocab[a].cn = degrees[v];
   }
   // 现在vocab 里面存了所有 {nodeId,degree} 的形式。
+  printf("[ %d ] Add Word To Vocab OK\n",my_rank);
+  printf("[ %d ] SortVocab Start\n",my_rank);
   SortVocab();
   if (debug_mode > 0) {
     printf("Vocab size: %lld\n", vocab_size);
@@ -941,6 +947,22 @@ void sgKernel(int *d_sen, int *d_sent_len, int *d_negSample, float alpha, int cn
   if (reuseNeg) { // A sentence share negative samples
     dim3 bDimNeg(32, negative+1, 1);
     switch(layer1_size) {
+      case 1: __sgNegReuse<1><<<gDim, bDimNeg>>>
+                (window, layer1_size, negative, vocab_size, alpha,
+                 d_sen, d_sent_len, d_syn1, d_syn0, d_negSample);
+                break;
+      case 10: __sgNegReuse<10><<<gDim, bDimNeg>>>
+                (window, layer1_size, negative, vocab_size, alpha,
+                 d_sen, d_sent_len, d_syn1, d_syn0, d_negSample);
+                break;
+      case 50: __sgNegReuse<50><<<gDim, bDimNeg>>>
+                (window, layer1_size, negative, vocab_size, alpha,
+                 d_sen, d_sent_len, d_syn1, d_syn0, d_negSample);
+                break;
+      case 100: __sgNegReuse<100><<<gDim, bDimNeg>>>
+                (window, layer1_size, negative, vocab_size, alpha,
+                 d_sen, d_sent_len, d_syn1, d_syn0, d_negSample);
+                break;
       case 200: __sgNegReuse<200><<<gDim, bDimNeg>>>
                 (window, layer1_size, negative, vocab_size, alpha,
                  d_sen, d_sent_len, d_syn1, d_syn0, d_negSample);
@@ -997,30 +1019,31 @@ void all_sync(){
 double sync_spend_time = 0.0f;
 void sync_embedding_func()
 {
-    Timer sync_timer;
-  chrono::steady_clock::time_point syncTime = chrono::steady_clock::now() + chrono::milliseconds(100);
+  Timer sync_timer;
+  // chrono::steady_clock::time_point syncTime = chrono::steady_clock::now() + chrono::milliseconds(1000);
   int sync_times = 1;
   while(!halt_sync)
   {
-    if(true == pause_sync) {
-      syncTime = chrono::steady_clock::now() + chrono::milliseconds(100); // next sync time.
-    }
-    unique_lock<std::mutex> lock(sync_mtx);
+    sleep(1);
+    // if(true == pause_sync) {
+    //   syncTime = chrono::steady_clock::now() + chrono::milliseconds(1000); // next sync time.
+    // }
+    // unique_lock<std::mutex> lock(sync_mtx);
     //wait_until syncTime.
-    sync_cv.wait_until(lock,syncTime);
+    // sync_cv.wait_until(lock,syncTime);
 
     if(halt_sync == true) break;
 
-    if(true == pause_sync) {
-      syncTime = chrono::steady_clock::now() + chrono::milliseconds(100); // next sync time.
-      continue;
-    }
+    // if(true == pause_sync) {
+    //   syncTime = chrono::steady_clock::now() + chrono::milliseconds(1000); // next sync time.
+    //   continue;
+    // }
     //block the training thread; 
-    trainBlocked = true;
+    // trainBlocked = true;
 
-    sync_timer.restart();
-    all_sync();
-    sync_spend_time += sync_timer.duration();
+    // sync_timer.restart();
+    // all_sync();
+    // sync_spend_time += sync_timer.duration();
     
     // copyFrom GPU, MPI, write back to GPU 
     //  No.1 pick up the sync id;
@@ -1079,9 +1102,9 @@ void sync_embedding_func()
             layer1_size * sizeof(float), cudaMemcpyHostToDevice));
     }
     checkCUDAerr(cudaDeviceSynchronize());
-    syncTime = chrono::steady_clock::now() + chrono::milliseconds(100); // next sync time.
-    trainBlocked = false; // unblock the traing thread.
-    sync_cv.notify_one(); // wake trainer
+    // syncTime = chrono::steady_clock::now() + chrono::milliseconds(100); // next sync time.
+    // trainBlocked = false; // unblock the traing thread.
+    // sync_cv.notify_one(); // wake trainer
     // printf("[ %d ] Syncing Times No.%d\n",my_rank,sync_times++);
   }
 }
@@ -1120,8 +1143,8 @@ void TrainModelThread(string data_path)
   fseek(fi, 0, SEEK_SET);
 
   while (1) {
-    unique_lock<mutex> lock(sync_mtx);
-    sync_cv.wait(lock,[]{return !trainBlocked;});// 没有阻塞的时候才训练
+    // unique_lock<mutex> lock(sync_mtx);
+    // sync_cv.wait(lock,[]{return !trainBlocked;});// 没有阻塞的时候才训练
                                                               
     if (word_count - last_word_count > 10000) {
       word_count_actual += word_count - last_word_count;
@@ -1214,7 +1237,10 @@ void TrainModelThread(string data_path)
     if (cbow)
       cbowKernel(d_sen, d_sent_len, alpha, cnt_sentence, reduSize);
     else
+    {
+      // printf("[ %d ] sgKernel Invoke\n",my_rank);
       sgKernel(d_sen, d_sent_len, d_negSample, alpha, cnt_sentence, reduSize);
+    }
   }
   cudaDeviceSynchronize();
   checkCUDAerr(cudaMemcpy(syn0, d_syn0, vocab_size * layer1_size * sizeof(float), cudaMemcpyDeviceToHost));
@@ -1466,7 +1492,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   checkCUDAerr(cudaMalloc(&d_B, EVALUATION_NEIGHBOUR_NUM * layer1_size *sizeof(float)));
   checkCUDAerr(cudaMalloc(&d_results, EVALUATION_NEIGHBOUR_NUM * sizeof(float)));
 
-  thread sync_thread(sync_embedding_func);
+  //thread sync_thread(sync_embedding_func);
   vertex_id_t last_eva_num = UINT_MAX;
   int train_iter = 0;
   bool stop_train_flag = false;
@@ -1483,14 +1509,17 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
     train_iter++;
     alpha = lr_scheduler->get_lr();
     pause_sync = false;
-    MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
+    //MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
+    printf("[ %d ] train %s start\n",my_rank,task_str.c_str());
     TrainModelThread(task_str);
-    MPI_Barrier(MPI_EMB_COMM);
-    pause_sync = true;
+    printf("[ %d ] train %s finished\n",my_rank,task_str.c_str());
+    //MPI_Barrier(MPI_EMB_COMM);
+    // pause_sync = true;
     std::cout << std::endl;
     train_spend_time += train_timer.duration();
     Timer eva_timer;
     vertex_id_t eva_num = 0;
+    printf("[ %d ] evaluation %s start\n",my_rank,task_str.c_str());
     for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
       if(vertex_walker_stop_flag[v]== 0 ){
         float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
@@ -1500,8 +1529,11 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
         }
       }
     }
-    MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EMB_COMM);
-    MPI_Allreduce(MPI_IN_PLACE, &eva_num, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM , MPI_EMB_COMM);
+    printf("[ %d ] evaluation %s finished\n",my_rank,task_str.c_str());
+    
+    printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
+    MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EVA_COMM);
+    MPI_Allreduce(MPI_IN_PLACE, &eva_num, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM , MPI_EVA_COMM);
     // 收敛了，每次减少的比例不多
     float eva_num_ratio = (float)eva_num / last_eva_num;
     if( last_eva_num != 0 && eva_num_ratio> EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO ){
@@ -1513,15 +1545,15 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
     printf("[ %d ]Iter %d Evaluate Num: %d Ratio: %f Time: %f s\n",my_rank,train_iter,eva_num,eva_num_ratio,eva_timer.duration());
     last_eva_num = eva_num;
   }
-  MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
-  halt_sync = true;
-  sync_cv.notify_all();
-  printf("[ %d ] Waiting Syncing Thread\n",my_rank);
-  sync_thread.join();
-  MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
-  printf("[ %d ] Syncing Thread Halt\n",my_rank);
+  // MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
+  // halt_sync = true;
+  // sync_cv.notify_all();
+  //printf("[ %d ] Waiting Syncing Thread\n",my_rank);
+  //sync_thread.join();
+  //MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
+  //printf("[ %d ] Syncing Thread Halt\n",my_rank);
 
-  printf("[%d] Train: %f Sync: %f EVA: %f \n",my_rank,train_spend_time,sync_spend_time,evaluate_spend_time);
+  //printf("[%d] Train: %f Sync: %f EVA: %f \n",my_rank,train_spend_time,sync_spend_time,evaluate_spend_time);
   cudaFree(d_A);
   cudaFree(d_B);
   cudaFree(d_results);
@@ -1623,6 +1655,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
 
   cout <<_my_rank << " train_corpus_cuda invoke ok\n";
   MPI_Comm_dup(MPI_COMM_WORLD,&MPI_EMB_COMM);
+  MPI_Comm_dup(MPI_COMM_WORLD,&MPI_EVA_COMM);
   MPI_Comm_size(MPI_EMB_COMM, &num_procs);
   MPI_Comm_rank(MPI_EMB_COMM, &my_rank);
   MPI_Get_processor_name(hostname, &hostname_len);
@@ -1679,7 +1712,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
 
   int blockSize2 = 256;
   int gridSize2 = (v * v + blockSize2 - 1) / blockSize2;
-  compute_kl_divergence_kernel<<<gridSize2,blockSize2>>>(d_A,d_B,d_res,v);
+  //compute_kl_divergence_kernel<<<gridSize2,blockSize2>>>(d_A,d_B,d_res,v);
   checkCUDAerr(cudaMemcpy(h_res,d_res,sizeof(float),cudaMemcpyDeviceToHost));
 
   std::cout<< "KL: " << *h_res<< std::endl;
@@ -1690,7 +1723,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   float h_test2[] = {1,2,3,1,4,1};
 
   float* h_kl = new float;
-  compute_kl_from_emb(h_test1,h_test2,h_kl,2,3);
+  //compute_kl_from_emb(h_test1,h_test2,h_kl,2,3);
   printf("[TEST] GET Kl From Emb: %f\n",*h_kl);
 
   // end test area
@@ -1766,7 +1799,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   if ((i = ArgPos((char *)"-reuse-neg", argc, argv)) > 0) reuseNeg = atoi(argv[i + 1]);
 
   vocab = (struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
-  vocab_hash = (int *)calloc(vocab_hash_size, sizeof(int));
+  vocab_hash = (long long *)calloc(vocab_hash_size, sizeof(long long));
   expTable = (float *)malloc((EXP_TABLE_SIZE + 1) * sizeof(float));
 
   for (i = 0; i < EXP_TABLE_SIZE; i++) {

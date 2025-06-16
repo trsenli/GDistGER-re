@@ -44,12 +44,12 @@ int main(int argc, char **argv)
     Timer load_timer;
     graph.load_graph(opt.v_num, opt.graph_path.c_str(), opt.partition_path.c_str(), opt.make_undirected);
     load_graph_time = load_timer.duration();
-    printf("load_graph ok!\n");
+    printf("[ %d ] load_graph ok!\n",my_rank);
     graph.vertex_cn.resize(graph.get_vertex_num());
     // graph.load_commonNeighbors(opt.graph_common_neighbour.c_str());
     vector<vertex_id_t> vertex_degree(graph.v_num,0);
     for (vertex_id_t v = 0; v < graph.v_num; v++){
-        vertex_degree[v] = graph.vertex_in_degree[v] + graph.vertex_out_degree[v];
+        vertex_degree[v] = graph.vertex_out_degree[v];
     }
     //myEdgeContainer* myec = reinterpret_cast<myEdgeContainer*>(&graph.g_csr);
     //cout <<"myec access " << myec-> adj_lists[0].begin->neighbour<<endl; 
@@ -57,19 +57,20 @@ int main(int argc, char **argv)
     myec->adj_lists = new myAdjList[graph.v_num];
     myec->adj_units = new myAdjUnit[graph.e_num];
     edge_id_t chunk_edge_idx = 0;
-    cout<<"malloc ok " << endl;
+    printf("[ %d ] malloc ok\n",my_rank);
     for(vertex_id_t v_i = 0; v_i < graph.v_num; v_i++){
       myec->adj_lists[v_i].begin = myec->adj_units + chunk_edge_idx;
       chunk_edge_idx += graph.csr->adj_lists[v_i].end -graph.csr->adj_lists[v_i].begin; 
       myec->adj_lists[v_i].end = myec->adj_units + chunk_edge_idx;
     }
-    cout <<my_rank<< " adj_lists copy" << endl;
     for(edge_id_t e_i = 0; e_i < graph.e_num; e_i++){
-	    myec->adj_units[e_i].neighbour = graph.csr->adj_units[e_i].neighbour;
-	    myec->adj_units[e_i].data = graph.csr->adj_units[e_i].data;
+     myec->adj_units[e_i].neighbour = graph.csr->adj_units[e_i].neighbour;
+     myec->adj_units[e_i].data = graph.csr->adj_units[e_i].data;
     }
-    cout <<my_rank <<" myec access " << myec-> adj_lists[110].begin->neighbour<<endl; 
-    cout << my_rank <<" graph.csr access " << graph.csr-> adj_lists[110].begin->neighbour<<endl; 
+    printf("[ %d ] myec copy ok\n",my_rank);
+    // cout <<my_rank <<" myec access " << myec-> adj_lists[110].begin->neighbour<<endl; 
+    // cout << my_rank <<" graph.csr access " << graph.csr-> adj_lists[110].begin->neighbour<<endl; 
+
     // train_corpus_cuda(argc,argv,vertex_degree,graph.out_queue,my_rank,myec);
     thread train_thread(train_corpus_cuda,argc,argv,std::ref(vertex_degree),std::ref(graph.out_queue), my_rank,myec);
     // * 
@@ -108,7 +109,7 @@ int main(int argc, char **argv)
             walk_conf.set_walk_rate(opt.rate);
         }
         Timer walk_timer;
-        printf("================= RANDOM WALK ================\n");
+        printf("=================[ %d ] RANDOM WALK ================\n",my_rank);
         graph.random_walk(&walker_conf, &tr_conf, &walk_conf);
         double sum_time = walk_timer.duration();
         double walk_time = sum_time - graph.other_time;
@@ -148,8 +149,9 @@ int main(int argc, char **argv)
         compress_size += compress_corpus[i].coreMap.mem_size();
         compress_size += compress_corpus[i].misc_data.size() * sizeof(vertex_id_t);
     }
-    cout <<"compress size: " << compress_size << " Byte." << endl;
-    cout <<"Ratio: " << (float)compress_size/origin_size << endl;
+    cout << "Original size: " << origin_size * 4 << " Byte." << endl;
+    cout <<"Top compress size: " << compress_size << " Byte." << endl;
+    cout <<"Top Ratio: " << (float)compress_size/origin_size << endl;
 
     origin_size = 0;
     compress_size =0;

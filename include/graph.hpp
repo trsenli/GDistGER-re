@@ -694,7 +694,7 @@ public:
         {
             read_graph(graph_path, local_partition_id, partition_num, read_edges, read_e_num);
             g_read_graph(graph_path,  g_read_edges, g_read_e_num);
-            printf("read edge=========ok\n");
+            printf("[ %d ] read edge=========ok\n",local_partition_id);
         } else if (graph_format == GF_Edgelist)
         {
 
@@ -720,9 +720,10 @@ public:
             read_edges = undirected_edges;
             read_e_num *= 2;
 
+            printf("[ %d ] local load as undirected ok\n",local_partition_id);
             // For g_read_graph
             Edge<edge_data_t> *g_undirected_edges = new Edge<edge_data_t>[g_read_e_num * 2];
-#pragma omp parallel for
+            #pragma omp parallel for
             for (edge_id_t e_i = 0; e_i < g_read_e_num; e_i++)
             {
 
@@ -735,6 +736,7 @@ public:
             g_read_edges = g_undirected_edges;
             g_read_e_num *= 2;
         }
+        printf("[p%d] global load as undirected ok \n",get_mpi_rank());
 
         this->vertex_out_degree = alloc_vertex_array<vertex_id_t>();
         this->vertex_in_degree = alloc_vertex_array<vertex_id_t>();
@@ -748,6 +750,7 @@ public:
             local_vertex_degree[read_edges[e_i].src]++;
         }
 
+        printf("[p%d] degree zero start counting \n",get_mpi_rank());
         MPI_Allreduce(local_vertex_degree.data(),  vertex_out_degree, v_num, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_COMM_WORLD);
         
         vertex_id_t degree_zero_n=0;
@@ -847,10 +850,12 @@ public:
         Edge<edge_data_t> *local_edges = new Edge<edge_data_t>[local_e_num];
 
         shuffle_edges(read_edges, read_e_num, local_edges, local_e_num);
+        printf("[ %d ] shuffle_edges ok\n",local_partition_id);
 
         this -> csr = new EdgeContainer<edge_data_t>();
 
-        // build_edge_container(local_edges, local_e_num, this->csr, vertex_out_degree); // load partial edges
+        build_edge_container(local_edges, local_e_num, this->csr, vertex_out_degree); // load partial edges
+        // build_global_edge_container(this->csr);
         build_all_edge_container_single(g_read_edges, g_read_e_num , this->csr,vertex_out_degree);
         printf("[ %d ] All edges CSR build success\n",local_partition_id);
         // printEdgeContainer(this->csr->adj_lists);
@@ -1091,6 +1096,8 @@ public:
         }
     }
 
+    // support Large data_amount
+
     template<typename msg_data_t>
     size_t distributed_execute(
         std::function<void(void)> msg_producer,
@@ -1130,6 +1137,42 @@ public:
                 msg_recv_buffer[p_i]->count = 0;
             }
             std::vector<MPI_Request*> requests[partition_num];
+            // auto recv_large_func = [&] (partition_id_t src)
+            // {
+            //     MPI_Status prob_status;
+            //     MPI_Probe(src, Tag_Msg, MPI_COMM_WORLD, &prob_status);
+            //     int sz;
+            //     MPI_Get_count(&prob_status, get_mpi_data_type<char>(), &sz);
+            //
+            //     // 接收头信息，获取总数据大小
+            //     size_t total_diff;
+            //     MPI_Irecv(&total_diff, sizeof(total_diff), MPI_BYTE, src, Tag_Msg, MPI_COMM_WORLD, requests[src]);
+            //     MPI_Wait(requests[src], MPI_STATUS_IGNORE);
+            //
+            //     const size_t max_block_size = INT_MAX / sizeof(msg_t); // 每块的最大大小
+            //     size_t received = 0;
+            //
+            //     while (received < total_diff)
+            //     {
+            //         size_t block_size = std::min(max_block_size, total_diff - received);
+            //         MPI_Request *recv_req = new MPI_Request();
+            //         requests[src].push_back(recv_req);
+            //
+            //         if (zero_copy_data == nullptr)
+            //         {
+            //             MPI_Irecv(((msg_t*)msg_recv_buffer[src]->data) + msg_recv_buffer[src]->count, block_size * sizeof(msg_t), get_mpi_data_type<char>(), src, Tag_Msg, MPI_COMM_WORLD, recv_req);
+            //             msg_recv_buffer[src]->count += block_size;
+            //             msg_recv_buffer[src]->template self_check<msg_t>();
+            //         }
+            //         else
+            //         {
+            //             MPI_Irecv(zero_copy_data + zero_copy_recv_count, block_size * sizeof(msg_t), get_mpi_data_type<char>(), src, Tag_Msg, MPI_COMM_WORLD, recv_req);
+            //             zero_copy_recv_count += block_size;
+            //         }
+            //
+            //         received += block_size;
+            //     }
+            // };
             auto recv_func = [&] (partition_id_t src)
             {
                 MPI_Status prob_status;
@@ -1186,6 +1229,27 @@ public:
                 send_progress[p_i] = 0;
             }
             std::vector<MPI_Request*> requests;
+
+            // auto send_large_func = [&] (partition_id_t dst, size_t total_diff)
+            // {
+            //     const size_t max_block_size = INT_MAX / sizeof(msg_t); // 每块的最大大小
+            //     size_t sent = 0;
+            //
+            //     while (sent < total_diff)
+            //     {
+            //         size_t block_size = std::min(max_block_size, total_diff - sent);
+            //         msg_send_buffer[dst]->template self_check<msg_t>();
+            //         MPI_Request* req = new MPI_Request();
+            //         requests.push_back(req);
+            //
+            //         assert(block_size * sizeof(msg_t) < INT_MAX); 
+            //         MPI_Isend(((msg_t*)msg_send_buffer[dst]->data) + send_progress[dst] + sent, block_size * sizeof(msg_t), get_mpi_data_type<char>(), dst, Tag_Msg, MPI_COMM_WORLD, req);
+            //
+            //         sent += block_size;
+            //     }
+            // };
+
+
             auto send_func = [&] (partition_id_t dst, size_t diff)
             {
                 msg_send_buffer[dst]->template self_check<msg_t>();
@@ -1195,6 +1259,7 @@ public:
                 assert(diff * sizeof(msg_t) < INT_MAX);
         
                 MPI_Isend(((msg_t*)msg_send_buffer[dst]->data) + send_progress[dst], diff * sizeof(msg_t), get_mpi_data_type<char>(), dst, Tag_Msg, MPI_COMM_WORLD, req);
+                // MPIX_Isend_x(((msg_t*)msg_send_buffer[dst]->data) + send_progress[dst], diff * sizeof(msg_t), get_mpi_data_type<char>(), dst, Tag_Msg, MPI_COMM_WORLD, req);
 #ifdef PERF_PROF
                 if (local_partition_id == 0)
                 {

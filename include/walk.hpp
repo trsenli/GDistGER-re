@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include "mpi_helper.hpp"
 #include "type.hpp"
 #include "graph.hpp"
 #include "path.hpp"
@@ -623,6 +624,7 @@ public:
         typedef Message<walker_t> walker_msg_t;
 
         walker_id_t walker_num = walker_config->walker_num;
+        // walker_id_t walker_num = walker_config->walker_num * init_round;
         // walker_id_t walker_per_iter = walker_num * walk_config->rate;
         walker_id_t walker_per_iter = walker_num;
         if (walker_per_iter == 0) walker_per_iter = 1;
@@ -668,7 +670,7 @@ public:
             std::cout << "walk_data.active_walker_num = " << walk_data.active_walker_num << std::endl;
 
             walk_data.local_walker_num = init_walkers(walk_data.local_walkers, walk_data.local_walkers_bak, walker_begin, walker_begin + walk_data.active_walker_num, walker_config->walker_init_dist_func, walker_config->walker_init_state_func);
-            printf("\n【Round %d  Walker Num: %d】 \n",iter,walk_data.local_walker_num);
+            printf("\n【 %d Round %d  Walker Num: %d】 \n",get_mpi_rank(),iter,walk_data.local_walker_num);
 
             if (walk_data.collect_path_flag)
             {
@@ -679,6 +681,7 @@ public:
                     walk_data.pc->add_footprint(Footprint(walk_data.local_walkers[w_i].data.id, walk_data.local_walkers[w_i].dst_vertex_id, 0), omp_get_thread_num());
                 }
             }
+
             internal_walk_epoch(&walk_data, walker_config, transition_config);
 
             if (walk_data.collect_path_flag)
@@ -701,10 +704,11 @@ public:
                     this->other_time += timer_dump.duration();
                     unique_lock<mutex> lock(mtx);
                     cv.wait(lock,[]{return !hasResource;});
+                    // if hasResource = true, then block the walking
                     hasResource = true;
                     this->out_queue.push(local_output_path);
                     cv.notify_one();
-                    cout<< "=========== [ PUSH " << local_output_path <<"]======" <<endl;
+                    cout<< get_mpi_rank()<<"  =========== [ PUSH " << local_output_path <<"]======" <<endl;
                     
                     MPI_Allreduce(context_map_freq.data(),  this->vertex_freq, this->v_num, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_COMM_WORLD);
                     uint64_t words_sum = 0;
@@ -830,6 +834,7 @@ public:
 
         std::vector<std::unordered_map<vertex_id_t, int>> walker_to_path(active_walker_num, std::unordered_map<vertex_id_t, int>());
         
+        printf("[ %d ] internal_walk_epoch start\n",get_mpi_rank());
         while (active_walker_num != 0)
         {
             #ifndef UNIT_TEST
